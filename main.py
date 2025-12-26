@@ -10,7 +10,7 @@ mcp = FastMCP("MCP-Server")
 # ------------------------------
 # Cloud-Friendly Configuration
 # ------------------------------
-MEMORY_DIR = os.getenv("MEMORY_DIR", "/data")
+MEMORY_DIR = os.getenv("MEMORY_DIR", "/tmp")
 MEMORY_FILE = Path(MEMORY_DIR) / "memories.json"
 
 def load_memories():
