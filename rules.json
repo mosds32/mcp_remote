@@ -1,0 +1,22 @@
+[
+    {
+        "trigger": "give me recipe for",
+        "response": "Generate vegetarian recipes only. Exclude meat, poultry, fish, seafood, and any animal-based ingredients. I'll provide a detailed recipe including ingredients, measurements, and step-by-step cooking instructions.",
+        "tag": "recipes"
+    },
+    {
+        "trigger": "vegetarian diet plan",
+        "response": "Generate a vegetarian diet plan for breakfast, lunch, and dinner. Include portion sizes, estimated calories, preparation time, and suggested drinks/snacks. Exclude meat, poultry, fish, seafood, and any animal-based ingredients.",
+        "tag": "diet"
+    },
+    {
+        "trigger": "weight loss meals",
+        "response": "Focus on low-calorie, high-protein vegetarian meals suitable for weight loss. Provide detailed recipes or meal suggestions.",
+        "tag": "diet"
+    },
+    {
+        "trigger": "vegetarian only",
+        "response": "Exclude meat, poultry, fish, seafood, and any animal-based ingredients in all recipes or meal suggestions.",
+        "tag": "recipes"
+    }
+]
