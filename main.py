@@ -4,34 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-from functools import wraps
-
-# OAuth and Session Management
-from authlib.integrations.starlette_client import OAuth
-from starlette.middleware.sessions import SessionMiddleware
-from starlette.responses import RedirectResponse
-from starlette.requests import Request
 
 mcp = FastMCP("MCP-Server")
-
-# ------------------------------
-# Google OAuth Configuration
-# ------------------------------
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this")
-
-# OAuth setup
-oauth = OAuth()
-oauth.register(
-    name='google',
-    client_id=GOOGLE_CLIENT_ID,
-    client_secret=GOOGLE_CLIENT_SECRET,
-    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
-    client_kwargs={
-        'scope': 'openid email profile'
-    }
-)
 
 # ------------------------------
 # Cloud-Friendly Configuration
@@ -71,81 +45,6 @@ def save_memories(memories):
     except Exception as e:
         print(f"❌ Error saving memories: {e}")
         return False
-
-# ------------------------------
-# Authentication Routes
-# ------------------------------
-@mcp.app.get("/login")
-async def login(request: Request):
-    """Redirect to Google OAuth login"""
-    redirect_uri = request.url_for('auth_callback')
-    return await oauth.google.authorize_redirect(request, redirect_uri)
-
-@mcp.app.get("/auth/callback")
-async def auth_callback(request: Request):
-    """Handle OAuth callback from Google"""
-    try:
-        token = await oauth.google.authorize_access_token(request)
-        user = token.get('userinfo')
-        
-        if user:
-            request.session['user'] = dict(user)
-            return RedirectResponse(url='/dashboard')
-        
-        return RedirectResponse(url='/login?error=auth_failed')
-    except Exception as e:
-        print(f"Auth error: {e}")
-        return RedirectResponse(url='/login?error=exception')
-
-@mcp.app.get("/logout")
-async def logout(request: Request):
-    """Logout user"""
-    request.session.pop('user', None)
-    return RedirectResponse(url='/')
-
-@mcp.app.get("/dashboard")
-async def dashboard(request: Request):
-    """Protected dashboard - requires authentication"""
-    user = request.session.get('user')
-    if not user:
-        return RedirectResponse(url='/login')
-    
-    return {
-        "message": "Welcome to your dashboard!",
-        "user": user,
-        "email": user.get('email'),
-        "name": user.get('name')
-    }
-
-@mcp.app.get("/")
-async def home(request: Request):
-    """Home page"""
-    user = request.session.get('user')
-    if user:
-        return {
-            "message": "You are logged in",
-            "user": user.get('email'),
-            "links": {
-                "dashboard": "/dashboard",
-                "logout": "/logout"
-            }
-        }
-    return {
-        "message": "Welcome to MCP Server with Google Auth",
-        "login": "/login"
-    }
-
-# ------------------------------
-# Authentication Decorator
-# ------------------------------
-def require_auth(func):
-    """Decorator to require authentication for tools"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        # Note: In MCP context, we'd need to pass user context differently
-        # This is a placeholder for the authentication logic
-        return func(*args, **kwargs)
-    return wrapper
 
 # ------------------------------
 # Memory-Based Chat Tool
@@ -417,8 +316,7 @@ def get_server_status() -> dict:
         "memories_count": len(memories),
         "memory_tags_count": len(memory_tags),
         "memory_tags": memory_tags,
-        "can_write": False,
-        "auth_configured": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+        "can_write": False
     }
     
     # Test write permissions
@@ -439,8 +337,8 @@ def get_help_documentation() -> dict:
     Get comprehensive help documentation for all tools.
     """
     return {
-        "server_name": "MCP-Server with Memory and Google Auth",
-        "version": "0.5.0",
+        "server_name": "MCP-Server with Memory",
+        "version": "0.4.0",
         "categories": {
             "Memory Management": {
                 "tools": [
@@ -463,15 +361,6 @@ def get_help_documentation() -> dict:
                 "description": "Monitor server health and get help"
             }
         },
-        "authentication": {
-            "type": "Google OAuth 2.0",
-            "routes": {
-                "login": "/login",
-                "logout": "/logout",
-                "callback": "/auth/callback",
-                "dashboard": "/dashboard"
-            }
-        },
         "usage_examples": {
             "memory": {
                 "create": "create_memory('user_name', 'Ali', 'profile')",
@@ -490,8 +379,8 @@ def server_info() -> dict:
     """Get information about the server."""
     info = {
         "name": "MCP-Server",
-        "version": "0.5.0",
-        "description": "Memory-Based MCP Server with Google OAuth Authentication",
+        "version": "0.4.0",
+        "description": "Memory-Based MCP Server with Tags and Chat",
         "tools": {
             "memory": [
                 "memory_based_chat",
@@ -511,19 +400,13 @@ def server_info() -> dict:
                 "get_help_documentation"
             ]
         },
-        "authentication": {
-            "type": "Google OAuth 2.0",
-            "configured": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
-        },
         "resources": ["info://server/info"],
         "author": "Your Name",
         "files": {
             "memories": str(MEMORY_FILE)
         },
-        "deployment_notes": "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and SECRET_KEY environment variables",
+        "deployment_notes": "Set MEMORY_DIR env variable for custom storage location",
         "features": [
-            "Google OAuth 2.0 Authentication",
-            "Session Management",
             "Memory-based chat responses",
             "Tag-based memory categorization",
             "Memory search functionality",
@@ -539,14 +422,10 @@ def server_info() -> dict:
 # ------------------------------
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 FastMCP Memory Server with Google Auth Starting...")
+    print("🚀 FastMCP Memory Server Starting...")
     print("=" * 60)
     print(f"📁 Memory file: {MEMORY_FILE}")
-    print(f"🔐 Auth configured: {bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)}")
     print(f"📝 Loading data...")
-    
-    # Add session middleware
-    mcp.app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
     
     memories = load_memories()
     print(f"✅ Loaded {len(memories)} memories")
@@ -562,13 +441,8 @@ if __name__ == "__main__":
         print(f"⚠️  Memories will be stored in memory only")
         print(f"💡 Set MEMORY_DIR environment variable to a writable directory")
     
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        print("⚠️  WARNING: Google OAuth credentials not configured!")
-        print("💡 Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables")
-    
     print("=" * 60)
     print(f"🌐 Starting server on http://0.0.0.0:8000")
-    print(f"🔐 Login at: http://0.0.0.0:8000/login")
     print("=" * 60)
     
     mcp.run(transport='http', host='0.0.0.0', port=8000)
