@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 
 # Firebase imports
 try:
