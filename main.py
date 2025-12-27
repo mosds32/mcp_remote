@@ -1,84 +1,48 @@
 from fastmcp import FastMCP
 import json
 import os
+from pathlib import Path
 from typing import Optional
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
-
-# Firebase imports
-import firebase_admin
-from firebase_admin import credentials, firestore
 
 mcp = FastMCP("MCP-Server")
 
 # ------------------------------
-# Firebase Configuration
+# Local Storage Configuration
 # ------------------------------
-FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS", "firebase-credentials.json")
+MEMORY_DIR = os.getenv("MEMORY_DIR", "/tmp")
+MEMORY_FILE = Path(MEMORY_DIR) / "memories.json"
 
-# Initialize Firebase (required - will fail if not configured)
-try:
-    if not firebase_admin._apps:
-        # Check if credentials are provided as JSON string in environment variable
-        firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
-        if firebase_json:
-            # Parse JSON string from environment variable
-            cred_dict = json.loads(firebase_json)
-            cred = credentials.Certificate(cred_dict)
-            print("🔑 Using Firebase credentials from environment variable")
-        else:
-            # Fallback to file-based credentials
-            cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
-            print("📄 Using Firebase credentials from file")
-        
-        firebase_admin.initialize_app(cred)
-    
-    db = firestore.client()
-    print("✅ Firebase initialized successfully")
-except Exception as e:
-    print(f"❌ Firebase initialization failed: {e}")
-    raise RuntimeError("Firebase is required for this server. Please configure Firebase credentials.")
+print("📁 Using local file storage")
 
 # ------------------------------
 # Storage Functions
 # ------------------------------
 def load_memories():
-    """Load memories from Firebase."""
+    """Load memories from local file."""
     try:
-        memories_ref = db.collection('memories')
-        docs = memories_ref.stream()
-        memories = []
-        for doc in docs:
-            memory_data = doc.to_dict()
-            memory_data['id'] = doc.id
-            memories.append(memory_data)
-        return memories
+        if MEMORY_FILE.exists():
+            with open(MEMORY_FILE, "r") as f:
+                content = f.read().strip()
+                if not content:
+                    return []
+                return json.loads(content)
+        else:
+            save_memories([])
+            return []
     except Exception as e:
-        print(f"⚠️  Error loading from Firebase: {e}")
+        print(f"⚠️  Error loading from file: {e}")
         return []
 
-def save_memory_to_firebase(memory_data):
-    """Save a single memory to Firebase."""
+def save_memories(memories):
+    """Save memories to local file."""
     try:
-        memories_ref = db.collection('memories')
-        # Use key as document ID
-        doc_ref = memories_ref.document(memory_data['key'])
-        doc_ref.set(memory_data)
+        MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(memories, f, indent=4)
         return True
     except Exception as e:
-        print(f"❌ Error saving to Firebase: {e}")
-        return False
-
-def delete_memory_from_firebase(key):
-    """Delete a memory from Firebase."""
-    try:
-        memories_ref = db.collection('memories')
-        doc_ref = memories_ref.document(key)
-        doc_ref.delete()
-        return True
-    except Exception as e:
-        print(f"❌ Error deleting from Firebase: {e}")
+        print(f"❌ Error saving to file: {e}")
         return False
 
 # ------------------------------
@@ -111,11 +75,12 @@ def create_memory(key: str, content: str, tag: Optional[str] = None, metadata: O
         "metadata": metadata if metadata else {}
     }
     
-    if save_memory_to_firebase(new_memory):
+    memories.append(new_memory)
+    if save_memories(memories):
         tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
-        return f"✅ Memory created in Firebase: '{key}'{tag_info}\n💾 Content: {content}"
+        return f"✅ Memory created: '{key}'{tag_info}\n💾 Content: {content}"
     else:
-        return f"❌ Failed to save to Firebase"
+        return f"⚠️  Memory created in-memory but could not be saved to disk."
 
 @mcp.tool
 def get_memory(key: str) -> dict:
@@ -127,7 +92,7 @@ def get_memory(key: str) -> dict:
             return {
                 "found": True,
                 "memory": memory,
-                "storage": "Firebase"
+                "storage": "Local"
             }
     
     return {
@@ -160,10 +125,10 @@ def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional
             
             memory["updated_at"] = datetime.now().isoformat()
             
-            if save_memory_to_firebase(memory):
-                return f"✅ Memory updated in Firebase: '{key}'\n" + "\n".join(updates)
+            if save_memories(memories):
+                return f"✅ Memory updated: '{key}'\n" + "\n".join(updates)
             else:
-                return f"❌ Failed to update in Firebase"
+                return f"⚠️  Memory updated in-memory but could not be saved."
     
     return f"❌ No memory found with key: '{key}'"
 
@@ -171,19 +136,16 @@ def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional
 def forget_memory(key: str) -> str:
     """Delete a specific memory by key."""
     memories = load_memories()
-    found = False
-    for memory in memories:
-        if memory["key"].lower() == key.lower():
-            found = True
-            break
+    original_count = len(memories)
+    memories = [m for m in memories if m["key"].lower() != key.lower()]
     
-    if found:
-        if delete_memory_from_firebase(key):
-            return f"✅ Memory forgotten from Firebase: '{key}'"
+    if len(memories) < original_count:
+        if save_memories(memories):
+            return f"✅ Memory forgotten: '{key}'"
         else:
-            return f"❌ Failed to delete from Firebase"
-    else:
-        return f"❌ No memory found with key: '{key}'"
+            return f"⚠️  Memory deleted from memory but could not be saved."
+    
+    return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool
 def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> dict:
@@ -203,7 +165,7 @@ def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> di
     return {
         "total_count": len(memories),
         "memories": memories,
-        "storage": "Firebase"
+        "storage": "Local"
     }
 
 @mcp.tool
@@ -233,13 +195,13 @@ def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
     if relevant_memories:
         relevant_memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
         best_match = relevant_memories[0]
-        return f"💾 {best_match['content']}\n[Source: {best_match['key']} | Storage: Firebase]"
+        return f"💾 {best_match['content']}\n[Source: {best_match['key']} | Storage: Local]"
     
     return "I don't have a memory about that yet."
 
 @mcp.tool
 def get_server_status() -> dict:
-    """Get server status including Firebase connection and statistics."""
+    """Get server status and statistics."""
     memories = load_memories()
     
     memory_tags = {}
@@ -248,30 +210,21 @@ def get_server_status() -> dict:
         memory_tags[tag] = memory_tags.get(tag, 0) + 1
     
     return {
-        "storage_type": "Firebase",
-        "firebase_enabled": True,
-        "firebase_initialized": True,
+        "storage_type": "Local File",
         "memories_count": len(memories),
         "memory_tags_count": len(memory_tags),
         "memory_tags": memory_tags,
+        "local_file_path": str(MEMORY_FILE),
+        "local_file_exists": MEMORY_FILE.exists()
     }
 
 @mcp.tool
 def clear_all_memories() -> str:
     """Clear all memories. Use with caution!"""
-    try:
-        memories = load_memories()
-        batch = db.batch()
-        memories_ref = db.collection('memories')
-        
-        for memory in memories:
-            doc_ref = memories_ref.document(memory['key'])
-            batch.delete(doc_ref)
-        
-        batch.commit()
-        return f"✅ All {len(memories)} memories cleared from Firebase"
-    except Exception as e:
-        return f"❌ Error clearing Firebase: {e}"
+    if save_memories([]):
+        return f"✅ All memories cleared from local storage"
+    else:
+        return f"⚠️  Memories cleared in-memory but could not be saved."
 
 # ------------------------------
 # Resources
@@ -280,13 +233,12 @@ def clear_all_memories() -> str:
 def server_info() -> dict:
     """Get information about the server."""
     return {
-        "name": "MCP-Server with Firebase",
-        "version": "1.0.0",
-        "description": "Memory-Based MCP Server with Firebase Storage",
+        "name": "MCP-Server",
+        "version": "0.5.0",
+        "description": "Memory-Based MCP Server with Local Storage",
         "storage": {
-            "type": "Firebase",
-            "firebase_enabled": True,
-            "firebase_initialized": True
+            "type": "Local File",
+            "file_path": str(MEMORY_FILE)
         },
         "tools": [
             "memory_based_chat",
@@ -307,13 +259,11 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 FastMCP Memory Server Starting...")
     print("=" * 60)
-    print(f"💾 Storage: Firebase (Firestore) ONLY")
+    print(f"📁 Storage: Local File")
+    print(f"📁 Memory file: {MEMORY_FILE}")
     
-    try:
-        memories = load_memories()
-        print(f"✅ Loaded {len(memories)} memories from Firebase")
-    except Exception as e:
-        print(f"⚠️  Error loading from Firebase: {e}")
+    memories = load_memories()
+    print(f"✅ Loaded {len(memories)} memories")
     
     print("=" * 60)
     print(f"🌐 Starting server on http://0.0.0.0:8000")
