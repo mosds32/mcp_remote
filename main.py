@@ -33,13 +33,24 @@ db = None
 if USE_FIREBASE and FIREBASE_AVAILABLE:
     try:
         if not firebase_admin._apps:
-            cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+            # Check if credentials are provided as JSON string in environment variable
+            firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+            if firebase_json:
+                # Parse JSON string from environment variable
+                cred_dict = json.loads(firebase_json)
+                cred = credentials.Certificate(cred_dict)
+                print("🔑 Using Firebase credentials from environment variable")
+            else:
+                # Fallback to file-based credentials
+                cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+                print("📄 Using Firebase credentials from file")
+            
             firebase_admin.initialize_app(cred)
         db = firestore.client()
         print("✅ Firebase initialized successfully")
     except Exception as e:
         print(f"⚠️  Firebase initialization failed: {e}")
-        print("📁 Falling back to local file storage")
+        print(f"📁 Falling back to local file storage")
         USE_FIREBASE = False
 else:
     print("📁 Using local file storage")
