@@ -17,8 +17,7 @@ mcp = FastMCP("MCP-Server")
 # ------------------------------
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS", "firebase-credentials.json")
 
-# Initialize Firebase
-db = None
+# Initialize Firebase (required - will fail if not configured)
 try:
     if not firebase_admin._apps:
         # Check if credentials are provided as JSON string in environment variable
@@ -34,6 +33,7 @@ try:
             print("📄 Using Firebase credentials from file")
         
         firebase_admin.initialize_app(cred)
+    
     db = firestore.client()
     print("✅ Firebase initialized successfully")
 except Exception as e:
@@ -250,7 +250,7 @@ def get_server_status() -> dict:
     return {
         "storage_type": "Firebase",
         "firebase_enabled": True,
-        "firebase_initialized": db is not None,
+        "firebase_initialized": True,
         "memories_count": len(memories),
         "memory_tags_count": len(memory_tags),
         "memory_tags": memory_tags,
@@ -286,7 +286,7 @@ def server_info() -> dict:
         "storage": {
             "type": "Firebase",
             "firebase_enabled": True,
-            "firebase_initialized": db is not None
+            "firebase_initialized": True
         },
         "tools": [
             "memory_based_chat",
