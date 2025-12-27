@@ -4,7 +4,7 @@ import os
 from typing import Optional
 from datetime import datetime
 
-mcp = FastMCP("MCP-Server")
+mcp = FastMCP("memory")
 
 # ------------------------------
 # Redis Storage Configuration
@@ -168,6 +168,40 @@ def get_memory(key: str) -> dict:
     }
 
 @mcp.tool()
+def get_memory_by_tag(tag: str) -> dict:
+    """
+    Retrieve all memories with a specific tag.
+    
+    Args:
+        tag: The tag to filter memories by
+        
+    Returns:
+        Dictionary with matching memories or error message
+        
+    Example:
+        get_memory_by_tag("preferences")
+    """
+    memories = load_memories()
+    
+    matching_memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
+    
+    if matching_memories:
+        return {
+            "found": True,
+            "tag": tag,
+            "count": len(matching_memories),
+            "memories": matching_memories,
+            "storage": STORAGE_TYPE,
+            "persistent": redis_client is not None
+        }
+    
+    return {
+        "found": False,
+        "tag": tag,
+        "message": f"No memories found with tag: '{tag}'"
+    }
+
+@mcp.tool()
 def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional[str] = None, new_metadata: Optional[dict] = None) -> str:
     """
     Update an existing memory's content, tag, or metadata.
@@ -279,6 +313,38 @@ def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> di
     }
 
 @mcp.tool()
+def list_tags() -> dict:
+    """
+    List all unique tags used in memories with their counts.
+    
+    Returns:
+        Dictionary with all tags and their usage counts
+        
+    Example:
+        list_tags()
+    """
+    memories = load_memories()
+    
+    if not memories:
+        return {
+            "total_tags": 0,
+            "tags": {},
+            "message": "No memories stored yet."
+        }
+    
+    tag_counts = {}
+    for memory in memories:
+        tag = memory.get("tag", "general")
+        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    
+    return {
+        "total_tags": len(tag_counts),
+        "tags": tag_counts,
+        "storage": STORAGE_TYPE,
+        "persistent": redis_client is not None
+    }
+
+@mcp.tool()
 def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
     """
     Respond based on stored memories by searching through content and keys.
@@ -372,6 +438,118 @@ def clear_all_memories() -> str:
     else:
         return f"⚠️  Error clearing memories"
 
+@mcp.tool()
+def get_help_documentation() -> dict:
+    """
+    Get comprehensive help documentation for all available tools.
+    
+    Returns:
+        Dictionary with detailed documentation for each tool
+        
+    Example:
+        get_help_documentation()
+    """
+    return {
+        "server_name": "Memory MCP Server",
+        "version": "1.0.0",
+        "storage": {
+            "type": STORAGE_TYPE,
+            "persistent": redis_client is not None
+        },
+        "tools": {
+            "create_memory": {
+                "description": "Create a new memory with key-value pair",
+                "parameters": {
+                    "key": "Unique identifier (required)",
+                    "content": "The content to remember (required)",
+                    "tag": "Category tag (optional, default: 'general')",
+                    "metadata": "Additional info as dict (optional)"
+                },
+                "example": "create_memory('user_pref', 'Dark mode enabled', 'preferences')"
+            },
+            "get_memory": {
+                "description": "Retrieve a specific memory by key",
+                "parameters": {
+                    "key": "The memory key to retrieve (required)"
+                },
+                "example": "get_memory('user_pref')"
+            },
+            "get_memory_by_tag": {
+                "description": "Retrieve all memories with a specific tag",
+                "parameters": {
+                    "tag": "The tag to filter by (required)"
+                },
+                "example": "get_memory_by_tag('preferences')"
+            },
+            "update_memory": {
+                "description": "Update an existing memory",
+                "parameters": {
+                    "key": "Memory key to update (required)",
+                    "new_content": "New content (optional)",
+                    "new_tag": "New tag (optional)",
+                    "new_metadata": "New metadata to merge (optional)"
+                },
+                "example": "update_memory('user_pref', new_content='Light mode enabled')"
+            },
+            "forget_memory": {
+                "description": "Delete a memory by key",
+                "parameters": {
+                    "key": "Memory key to delete (required)"
+                },
+                "example": "forget_memory('user_pref')"
+            },
+            "list_memories": {
+                "description": "List all memories with optional filters",
+                "parameters": {
+                    "tag": "Filter by tag (optional)",
+                    "search": "Search in keys/content (optional)"
+                },
+                "example": "list_memories(tag='preferences')"
+            },
+            "list_tags": {
+                "description": "List all unique tags with usage counts",
+                "parameters": {},
+                "example": "list_tags()"
+            },
+            "memory_based_chat": {
+                "description": "Search and respond with relevant memories",
+                "parameters": {
+                    "message": "Search query (required)",
+                    "tag": "Filter by tag first (optional)"
+                },
+                "example": "memory_based_chat('What does user prefer?')"
+            },
+            "get_server_status": {
+                "description": "Get server statistics and status",
+                "parameters": {},
+                "example": "get_server_status()"
+            },
+            "clear_all_memories": {
+                "description": "Clear all memories (CAUTION: Cannot be undone)",
+                "parameters": {},
+                "example": "clear_all_memories()"
+            },
+            "get_help_documentation": {
+                "description": "Get this help documentation",
+                "parameters": {},
+                "example": "get_help_documentation()"
+            }
+        },
+        "storage_setup": {
+            "current_storage": STORAGE_TYPE,
+            "to_enable_permanent_storage": [
+                "1. Visit https://upstash.com (FREE tier available)",
+                "2. Create a new Redis database",
+                "3. Copy REDIS_URL from database details",
+                "4. Set REDIS_URL environment variable",
+                "5. Restart the MCP server"
+            ]
+        } if not redis_client else {
+            "current_storage": STORAGE_TYPE,
+            "status": "✅ Permanent storage enabled"
+        }
+    }
+
 # ------------------------------
 # Resources
 # ------------------------------
@@ -379,7 +557,7 @@ def clear_all_memories() -> str:
 def server_info() -> dict:
     """Get comprehensive information about the MCP server."""
     return {
-        "name": "MCP-Server",
+        "name": "memory",
         "version": "1.0.0",
         "description": "Memory-Based MCP Server with Persistent Storage",
         "storage": {
@@ -391,12 +569,15 @@ def server_info() -> dict:
         "tools": [
             "create_memory",
             "get_memory",
+            "get_memory_by_tag",
             "update_memory",
             "forget_memory",
             "list_memories",
+            "list_tags",
             "memory_based_chat",
             "get_server_status",
-            "clear_all_memories"
+            "clear_all_memories",
+            "get_help_documentation"
         ],
         "setup_instructions": {
             "step_1": "Sign up at https://upstash.com (FREE tier available)",
