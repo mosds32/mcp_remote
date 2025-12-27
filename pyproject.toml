@@ -1,9 +1,11 @@
 [project]
 name = "mcp-server"
 version = "0.1.0"
-description = "Add your description here"
+description = "Memory-Based MCP Server with Firebase Integration"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastmcp>=2.14.1",
+    "firebase-admin>=6.5.0",
+    "python-dotenv>=1.0.0",
 ]
