@@ -10,3 +10,11 @@ wheels/
 .venv
 
 .env
+# Firebase credentials
+firebase-credentials.json
+*.json
+
+# Keep pyproject.toml and other configs
+!pyproject.toml
+!package.json
+!tsconfig.json

@@ -5,85 +5,120 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
+# Firebase imports
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    FIREBASE_AVAILABLE = True
+except ImportError:
+    FIREBASE_AVAILABLE = False
+    print("⚠️  Firebase not installed. Run: pip install firebase-admin")
+
 mcp = FastMCP("MCP-Server")
 
 # ------------------------------
-# Cloud-Friendly Configuration
+# Firebase Configuration
 # ------------------------------
+FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS", "firebase-credentials.json")
+USE_FIREBASE = os.getenv("USE_FIREBASE", "true").lower() == "true"
+
+# Fallback to local storage
 MEMORY_DIR = os.getenv("MEMORY_DIR", "/tmp")
 MEMORY_FILE = Path(MEMORY_DIR) / "memories.json"
 
-def load_memories():
-    """Load memories from file, handling empty or missing files."""
+# Initialize Firebase
+db = None
+if USE_FIREBASE and FIREBASE_AVAILABLE:
     try:
-        if MEMORY_FILE.exists():
-            with open(MEMORY_FILE, "r") as f:
-                content = f.read().strip()
-                if not content:
-                    return []
-                return json.loads(content)
-        else:
-            save_memories([])
-            return []
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("✅ Firebase initialized successfully")
     except Exception as e:
-        print(f"⚠️ Error loading memories: {e}")
-        return []
+        print(f"⚠️  Firebase initialization failed: {e}")
+        print("📁 Falling back to local file storage")
+        USE_FIREBASE = False
+else:
+    print("📁 Using local file storage")
+
+# ------------------------------
+# Storage Abstraction Layer
+# ------------------------------
+def load_memories():
+    """Load memories from Firebase or local file."""
+    if USE_FIREBASE and db:
+        try:
+            memories_ref = db.collection('memories')
+            docs = memories_ref.stream()
+            memories = []
+            for doc in docs:
+                memory_data = doc.to_dict()
+                memory_data['id'] = doc.id
+                memories.append(memory_data)
+            return memories
+        except Exception as e:
+            print(f"⚠️  Error loading from Firebase: {e}")
+            return []
+    else:
+        # Fallback to local file
+        try:
+            if MEMORY_FILE.exists():
+                with open(MEMORY_FILE, "r") as f:
+                    content = f.read().strip()
+                    if not content:
+                        return []
+                    return json.loads(content)
+            else:
+                save_memories([])
+                return []
+        except Exception as e:
+            print(f"⚠️  Error loading from file: {e}")
+            return []
 
 def save_memories(memories):
-    """Save memories with error handling."""
-    try:
-        MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(MEMORY_FILE, "w") as f:
-            json.dump(memories, f, indent=4)
-        print(f"✅ Memories saved to {MEMORY_FILE}")
+    """Save memories to Firebase or local file."""
+    if USE_FIREBASE and db:
+        # For Firebase, we don't need to save all at once
+        # Individual operations handle Firebase updates
         return True
-    except PermissionError:
-        print(f"❌ Permission denied: Cannot write to {MEMORY_FILE}")
-        print(f"💡 Tip: Set MEMORY_DIR environment variable to a writable directory")
-        return False
-    except Exception as e:
-        print(f"❌ Error saving memories: {e}")
-        return False
+    else:
+        # Fallback to local file
+        try:
+            MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(MEMORY_FILE, "w") as f:
+                json.dump(memories, f, indent=4)
+            return True
+        except Exception as e:
+            print(f"❌ Error saving to file: {e}")
+            return False
 
-# ------------------------------
-# Memory-Based Chat Tool
-# ------------------------------
-@mcp.tool
-def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
-    """
-    Respond based on stored memories.
-    Searches through memory content and keys for relevant information.
-    Optionally filter by tag.
-    """
-    memories = load_memories()
-    if not memories:
-        return "No memories stored yet. Create memories using create_memory tool."
-    
-    # Filter by tag if specified
-    if tag:
-        memories = [m for m in memories if m.get("tag", "").lower() == tag.lower()]
-        if not memories:
-            return f"No memories found with tag: '{tag}'"
-    
-    message_lower = message.lower()
-    
-    # Search for relevant memories
-    relevant_memories = []
-    for memory in memories:
-        # Check if message contains the key or content contains message keywords
-        if (message_lower in memory["key"].lower() or 
-            message_lower in memory["content"].lower() or
-            memory["key"].lower() in message_lower):
-            relevant_memories.append(memory)
-    
-    if relevant_memories:
-        # Return the most recently updated memory
-        relevant_memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-        best_match = relevant_memories[0]
-        return f"📝 {best_match['content']}\n[Source: {best_match['key']}]"
-    
-    return "I don't have a memory about that yet."
+def save_memory_to_firebase(memory_data):
+    """Save a single memory to Firebase."""
+    if USE_FIREBASE and db:
+        try:
+            memories_ref = db.collection('memories')
+            # Use key as document ID
+            doc_ref = memories_ref.document(memory_data['key'])
+            doc_ref.set(memory_data)
+            return True
+        except Exception as e:
+            print(f"❌ Error saving to Firebase: {e}")
+            return False
+    return False
+
+def delete_memory_from_firebase(key):
+    """Delete a memory from Firebase."""
+    if USE_FIREBASE and db:
+        try:
+            memories_ref = db.collection('memories')
+            doc_ref = memories_ref.document(key)
+            doc_ref.delete()
+            return True
+        except Exception as e:
+            print(f"❌ Error deleting from Firebase: {e}")
+            return False
+    return False
 
 # ------------------------------
 # Memory Management Tools
@@ -96,12 +131,12 @@ def create_memory(key: str, content: str, tag: Optional[str] = None, metadata: O
     Args:
         key: Unique identifier for the memory
         content: The actual content to remember
-        tag: Optional tag for categorization (e.g., 'preferences', 'facts', 'context')
-        metadata: Optional additional information as a dictionary
+        tag: Optional tag for categorization
+        metadata: Optional additional information
     """
     memories = load_memories()
     
-    # Check if memory with same key exists
+    # Check if memory exists
     for memory in memories:
         if memory["key"].lower() == key.lower():
             return f"❌ Memory with key '{key}' already exists. Use update_memory to modify it."
@@ -115,25 +150,31 @@ def create_memory(key: str, content: str, tag: Optional[str] = None, metadata: O
         "metadata": metadata if metadata else {}
     }
     
-    memories.append(new_memory)
-    if save_memories(memories):
-        tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
-        return f"✅ Memory created: '{key}'{tag_info}\n📝 Content: {content}"
+    if USE_FIREBASE and db:
+        if save_memory_to_firebase(new_memory):
+            tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
+            return f"✅ Memory created in Firebase: '{key}'{tag_info}\n💾 Content: {content}"
+        else:
+            return f"❌ Failed to save to Firebase"
     else:
-        return f"⚠️ Memory created in-memory but could not be saved to disk."
+        memories.append(new_memory)
+        if save_memories(memories):
+            tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
+            return f"✅ Memory created locally: '{key}'{tag_info}\n💾 Content: {content}"
+        else:
+            return f"⚠️  Memory created in-memory but could not be saved to disk."
 
 @mcp.tool
 def get_memory(key: str) -> dict:
-    """
-    Retrieve a specific memory by key.
-    """
+    """Retrieve a specific memory by key."""
     memories = load_memories()
     
     for memory in memories:
         if memory["key"].lower() == key.lower():
             return {
                 "found": True,
-                "memory": memory
+                "memory": memory,
+                "storage": "Firebase" if USE_FIREBASE and db else "Local"
             }
     
     return {
@@ -142,52 +183,8 @@ def get_memory(key: str) -> dict:
     }
 
 @mcp.tool
-def get_memory_by_tag(tag: str) -> dict:
-    """
-    Get all memories with a specific tag.
-    """
-    memories = load_memories()
-    tagged_memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
-    
-    return {
-        "tag": tag,
-        "count": len(tagged_memories),
-        "memories": tagged_memories
-    }
-
-@mcp.tool
-def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> dict:
-    """
-    List all memories, optionally filtered by tag or search term.
-    
-    Args:
-        tag: Filter by specific tag
-        search: Search in keys and content
-    """
-    memories = load_memories()
-    
-    # Filter by tag if specified
-    if tag:
-        memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
-    
-    # Search in keys and content if specified
-    if search:
-        search_lower = search.lower()
-        memories = [
-            m for m in memories 
-            if search_lower in m["key"].lower() or search_lower in m["content"].lower()
-        ]
-    
-    return {
-        "total_count": len(memories),
-        "memories": memories
-    }
-
-@mcp.tool
 def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional[str] = None, new_metadata: Optional[dict] = None) -> str:
-    """
-    Update an existing memory's content, tag, or metadata.
-    """
+    """Update an existing memory's content, tag, or metadata."""
     memories = load_memories()
     
     for memory in memories:
@@ -198,7 +195,7 @@ def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional
             updates = []
             if new_content:
                 memory["content"] = new_content
-                updates.append(f"Content: {old_content[:50]}... → {new_content[:50]}...")
+                updates.append(f"Content updated")
             
             if new_tag:
                 memory["tag"] = new_tag
@@ -210,166 +207,149 @@ def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional
             
             memory["updated_at"] = datetime.now().isoformat()
             
-            if save_memories(memories):
-                return f"✅ Memory updated: '{key}'\n" + "\n".join(updates)
+            if USE_FIREBASE and db:
+                if save_memory_to_firebase(memory):
+                    return f"✅ Memory updated in Firebase: '{key}'\n" + "\n".join(updates)
+                else:
+                    return f"❌ Failed to update in Firebase"
             else:
-                return f"⚠️ Memory updated in-memory but could not be saved to disk."
+                if save_memories(memories):
+                    return f"✅ Memory updated locally: '{key}'\n" + "\n".join(updates)
+                else:
+                    return f"⚠️  Memory updated in-memory but could not be saved."
     
     return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool
 def forget_memory(key: str) -> str:
-    """
-    Delete a specific memory by key.
-    """
-    memories = load_memories()
-    original_count = len(memories)
-    memories = [m for m in memories if m["key"].lower() != key.lower()]
-    
-    if len(memories) < original_count:
-        if save_memories(memories):
-            return f"✅ Memory forgotten: '{key}'"
+    """Delete a specific memory by key."""
+    if USE_FIREBASE and db:
+        memories = load_memories()
+        found = False
+        for memory in memories:
+            if memory["key"].lower() == key.lower():
+                found = True
+                break
+        
+        if found:
+            if delete_memory_from_firebase(key):
+                return f"✅ Memory forgotten from Firebase: '{key}'"
+            else:
+                return f"❌ Failed to delete from Firebase"
         else:
-            return f"⚠️ Memory deleted from in-memory but could not be saved to disk."
-    
-    return f"❌ No memory found with key: '{key}'"
+            return f"❌ No memory found with key: '{key}'"
+    else:
+        memories = load_memories()
+        original_count = len(memories)
+        memories = [m for m in memories if m["key"].lower() != key.lower()]
+        
+        if len(memories) < original_count:
+            if save_memories(memories):
+                return f"✅ Memory forgotten locally: '{key}'"
+            else:
+                return f"⚠️  Memory deleted from memory but could not be saved."
+        
+        return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool
-def forget_memories_by_tag(tag: str) -> str:
-    """
-    Delete all memories with a specific tag.
-    """
+def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> dict:
+    """List all memories, optionally filtered by tag or search term."""
     memories = load_memories()
-    original_count = len(memories)
-    memories = [m for m in memories if m.get("tag", "general").lower() != tag.lower()]
     
-    deleted_count = original_count - len(memories)
+    if tag:
+        memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
     
-    if deleted_count > 0:
-        if save_memories(memories):
-            return f"✅ Forgotten {deleted_count} memory/memories with tag: '{tag}'"
-        else:
-            return f"⚠️ Memories deleted from in-memory but could not be saved to disk."
+    if search:
+        search_lower = search.lower()
+        memories = [
+            m for m in memories 
+            if search_lower in m["key"].lower() or search_lower in m["content"].lower()
+        ]
     
-    return f"❌ No memories found with tag: '{tag}'"
+    return {
+        "total_count": len(memories),
+        "memories": memories,
+        "storage": "Firebase" if USE_FIREBASE and db else "Local"
+    }
 
 @mcp.tool
-def list_memory_tags() -> dict:
+def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
     """
-    Get all unique memory tags and their counts.
+    Respond based on stored memories.
+    Searches through memory content and keys for relevant information.
     """
     memories = load_memories()
-    tags = {}
+    if not memories:
+        return "No memories stored yet. Create memories using create_memory tool."
+    
+    if tag:
+        memories = [m for m in memories if m.get("tag", "").lower() == tag.lower()]
+        if not memories:
+            return f"No memories found with tag: '{tag}'"
+    
+    message_lower = message.lower()
+    relevant_memories = []
     
     for memory in memories:
-        tag = memory.get("tag", "general")
-        tags[tag] = tags.get(tag, 0) + 1
+        if (message_lower in memory["key"].lower() or 
+            message_lower in memory["content"].lower() or
+            memory["key"].lower() in message_lower):
+            relevant_memories.append(memory)
     
-    return {
-        "total_tags": len(tags),
-        "tags": tags
-    }
-
-@mcp.tool
-def clear_all_memories() -> str:
-    """
-    Clear all memories. Use with caution!
-    """
-    if save_memories([]):
-        return f"✅ All memories cleared"
-    else:
-        return f"⚠️ Memories cleared in-memory but could not be saved to disk."
-
-@mcp.tool
-def search_memories(query: str) -> dict:
-    """
-    Search memories by content or key.
-    """
-    memories = load_memories()
-    query_lower = query.lower()
+    if relevant_memories:
+        relevant_memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        best_match = relevant_memories[0]
+        storage_info = "Firebase" if USE_FIREBASE and db else "Local"
+        return f"💾 {best_match['content']}\n[Source: {best_match['key']} | Storage: {storage_info}]"
     
-    results = [
-        m for m in memories 
-        if query_lower in m["key"].lower() or query_lower in m["content"].lower()
-    ]
-    
-    return {
-        "query": query,
-        "results_count": len(results),
-        "results": results
-    }
+    return "I don't have a memory about that yet."
 
 @mcp.tool
 def get_server_status() -> dict:
-    """Get server status including file permissions and tag statistics."""
+    """Get server status including Firebase connection and statistics."""
     memories = load_memories()
     
-    # Calculate memory tags
     memory_tags = {}
     for memory in memories:
         tag = memory.get("tag", "general")
         memory_tags[tag] = memory_tags.get(tag, 0) + 1
     
     status = {
-        "memory_file_path": str(MEMORY_FILE),
-        "memory_file_exists": MEMORY_FILE.exists(),
+        "storage_type": "Firebase" if USE_FIREBASE and db else "Local File",
+        "firebase_enabled": USE_FIREBASE and db is not None,
         "memories_count": len(memories),
         "memory_tags_count": len(memory_tags),
         "memory_tags": memory_tags,
-        "can_write": False
     }
     
-    # Test write permissions
-    try:
-        test_file = MEMORY_FILE.parent / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-        status["can_write"] = True
-    except:
-        status["can_write"] = False
-        status["error"] = "No write permissions"
+    if not USE_FIREBASE or not db:
+        status["local_file_path"] = str(MEMORY_FILE)
+        status["local_file_exists"] = MEMORY_FILE.exists()
     
     return status
 
 @mcp.tool
-def get_help_documentation() -> dict:
-    """
-    Get comprehensive help documentation for all tools.
-    """
-    return {
-        "server_name": "MCP-Server with Memory",
-        "version": "0.4.0",
-        "categories": {
-            "Memory Management": {
-                "tools": [
-                    "memory_based_chat",
-                    "create_memory",
-                    "get_memory",
-                    "get_memory_by_tag",
-                    "list_memories",
-                    "update_memory",
-                    "forget_memory",
-                    "forget_memories_by_tag",
-                    "list_memory_tags",
-                    "clear_all_memories",
-                    "search_memories"
-                ],
-                "description": "Store, retrieve, and chat with long-term memory"
-            },
-            "Server Status": {
-                "tools": ["get_server_status", "get_help_documentation"],
-                "description": "Monitor server health and get help"
-            }
-        },
-        "usage_examples": {
-            "memory": {
-                "create": "create_memory('user_name', 'Ali', 'profile')",
-                "retrieve": "get_memory('user_name')",
-                "search": "search_memories('Ali')",
-                "chat": "memory_based_chat('what is my name?')"
-            }
-        }
-    }
+def clear_all_memories() -> str:
+    """Clear all memories. Use with caution!"""
+    if USE_FIREBASE and db:
+        try:
+            memories = load_memories()
+            batch = db.batch()
+            memories_ref = db.collection('memories')
+            
+            for memory in memories:
+                doc_ref = memories_ref.document(memory['key'])
+                batch.delete(doc_ref)
+            
+            batch.commit()
+            return f"✅ All memories cleared from Firebase"
+        except Exception as e:
+            return f"❌ Error clearing Firebase: {e}"
+    else:
+        if save_memories([]):
+            return f"✅ All memories cleared from local storage"
+        else:
+            return f"⚠️  Memories cleared in-memory but could not be saved."
 
 # ------------------------------
 # Resources
@@ -377,45 +357,26 @@ def get_help_documentation() -> dict:
 @mcp.resource("info://server/info")
 def server_info() -> dict:
     """Get information about the server."""
-    info = {
-        "name": "MCP-Server",
-        "version": "0.4.0",
-        "description": "Memory-Based MCP Server with Tags and Chat",
-        "tools": {
-            "memory": [
-                "memory_based_chat",
-                "create_memory",
-                "get_memory",
-                "get_memory_by_tag",
-                "list_memories",
-                "update_memory",
-                "forget_memory",
-                "forget_memories_by_tag",
-                "list_memory_tags",
-                "clear_all_memories",
-                "search_memories"
-            ],
-            "system": [
-                "get_server_status",
-                "get_help_documentation"
-            ]
+    return {
+        "name": "MCP-Server with Firebase",
+        "version": "0.5.0",
+        "description": "Memory-Based MCP Server with Firebase Integration",
+        "storage": {
+            "type": "Firebase" if USE_FIREBASE and db else "Local File",
+            "firebase_enabled": FIREBASE_AVAILABLE and USE_FIREBASE,
+            "firebase_initialized": db is not None
         },
-        "resources": ["info://server/info"],
-        "author": "Your Name",
-        "files": {
-            "memories": str(MEMORY_FILE)
-        },
-        "deployment_notes": "Set MEMORY_DIR env variable for custom storage location",
-        "features": [
-            "Memory-based chat responses",
-            "Tag-based memory categorization",
-            "Memory search functionality",
-            "Timestamp tracking for memories",
-            "Metadata support for memories",
-            "Filter memories by tag"
+        "tools": [
+            "memory_based_chat",
+            "create_memory",
+            "get_memory",
+            "list_memories",
+            "update_memory",
+            "forget_memory",
+            "clear_all_memories",
+            "get_server_status"
         ]
     }
-    return info
 
 # ------------------------------
 # Run Server
@@ -424,22 +385,19 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 FastMCP Memory Server Starting...")
     print("=" * 60)
-    print(f"📁 Memory file: {MEMORY_FILE}")
-    print(f"📝 Loading data...")
     
-    memories = load_memories()
-    print(f"✅ Loaded {len(memories)} memories")
-    
-    # Test write permissions
-    test_memories = memories if memories else []
-    memories_saved = save_memories(test_memories)
-    
-    if memories_saved:
-        print(f"✅ Write permissions OK")
+    if USE_FIREBASE and db:
+        print(f"💾 Storage: Firebase (Firestore)")
+        try:
+            memories = load_memories()
+            print(f"✅ Loaded {len(memories)} memories from Firebase")
+        except Exception as e:
+            print(f"⚠️  Error loading from Firebase: {e}")
     else:
-        print(f"⚠️  Limited write permissions")
-        print(f"⚠️  Memories will be stored in memory only")
-        print(f"💡 Set MEMORY_DIR environment variable to a writable directory")
+        print(f"📁 Storage: Local File")
+        print(f"📁 Memory file: {MEMORY_FILE}")
+        memories = load_memories()
+        print(f"✅ Loaded {len(memories)} memories")
     
     print("=" * 60)
     print(f"🌐 Starting server on http://0.0.0.0:8000")
