@@ -1,10 +1,46 @@
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.google import GoogleProvider
 import json
 import os
 from typing import Optional
 from datetime import datetime
 
-mcp = FastMCP("memory")
+# ------------------------------
+# Authentication Configuration
+# ------------------------------
+auth_provider = None
+
+# Check if Google OAuth credentials are available
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+BASE_URL = os.getenv("BASE_URL")  # Your deployed server URL
+
+if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
+    try:
+        auth_provider = GoogleProvider(
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            base_url=BASE_URL
+        )
+        print("✅ Google OAuth authentication enabled")
+        print(f"🔐 Auth URL: {BASE_URL}")
+    except Exception as e:
+        print(f"⚠️  Failed to initialize Google OAuth: {e}")
+        print("💡 Server will run without authentication")
+else:
+    print("ℹ️  Google OAuth not configured")
+    print("💡 To enable Google authentication:")
+    print("   1. Create OAuth 2.0 credentials at https://console.cloud.google.com")
+    print("   2. Set GOOGLE_CLIENT_ID environment variable")
+    print("   3. Set GOOGLE_CLIENT_SECRET environment variable")
+    print("   4. Set BASE_URL environment variable (your server URL)")
+    print("   5. Add authorized redirect URI: {BASE_URL}/oauth/callback")
+
+# Initialize FastMCP with or without authentication
+mcp = FastMCP(
+    name="memory",
+    auth=auth_provider  # Will be None if credentials not configured
+)
 
 # ------------------------------
 # Redis Storage Configuration
@@ -406,8 +442,14 @@ def get_server_status() -> dict:
         memory_tags[tag] = memory_tags.get(tag, 0) + 1
     
     redis_status = "Connected ✓" if redis_client else "Not Connected ✗"
+    auth_status = "Enabled ✓" if auth_provider else "Disabled ✗"
     
     return {
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "status": auth_status
+        },
         "storage_type": STORAGE_TYPE,
         "redis_status": redis_status,
         "redis_url_configured": os.getenv("REDIS_URL") is not None,
@@ -452,6 +494,10 @@ def get_help_documentation() -> dict:
     return {
         "server_name": "Memory MCP Server",
         "version": "1.0.0",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None"
+        },
         "storage": {
             "type": STORAGE_TYPE,
             "persistent": redis_client is not None
@@ -547,6 +593,21 @@ def get_help_documentation() -> dict:
         } if not redis_client else {
             "current_storage": STORAGE_TYPE,
             "status": "✅ Permanent storage enabled"
+        },
+        "auth_setup": {
+            "current_status": "Enabled" if auth_provider else "Disabled",
+            "to_enable_google_auth": [
+                "1. Visit https://console.cloud.google.com",
+                "2. Create OAuth 2.0 credentials",
+                "3. Set GOOGLE_CLIENT_ID environment variable",
+                "4. Set GOOGLE_CLIENT_SECRET environment variable",
+                "5. Set BASE_URL environment variable (your server URL)",
+                "6. Add authorized redirect URI: {BASE_URL}/oauth/callback",
+                "7. Restart the MCP server"
+            ]
+        } if not auth_provider else {
+            "current_status": "✅ Google OAuth enabled",
+            "provider": "Google"
         }
     }
 
@@ -559,7 +620,12 @@ def server_info() -> dict:
     return {
         "name": "memory",
         "version": "1.0.0",
-        "description": "Memory-Based MCP Server with Persistent Storage",
+        "description": "Memory-Based MCP Server with Persistent Storage and Google OAuth",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "base_url": BASE_URL if auth_provider else None
+        },
         "storage": {
             "type": STORAGE_TYPE,
             "persistent": redis_client is not None,
@@ -579,7 +645,20 @@ def server_info() -> dict:
             "clear_all_memories",
             "get_help_documentation"
         ],
-        "setup_instructions": {
+        "auth_setup_instructions": {
+            "step_1": "Visit https://console.cloud.google.com",
+            "step_2": "Create OAuth 2.0 credentials (Web application)",
+            "step_3": "Copy Client ID and Client Secret",
+            "step_4": "Add GOOGLE_CLIENT_ID environment variable",
+            "step_5": "Add GOOGLE_CLIENT_SECRET environment variable",
+            "step_6": "Add BASE_URL environment variable (your server URL)",
+            "step_7": "Add authorized redirect URI: {BASE_URL}/oauth/callback",
+            "step_8": "Redeploy your server",
+            "note": "Google OAuth enables secure authentication for MCP clients"
+        } if not auth_provider else {
+            "status": "✅ Google OAuth configured"
+        },
+        "storage_setup_instructions": {
             "step_1": "Sign up at https://upstash.com (FREE tier available)",
             "step_2": "Create a new Redis database",
             "step_3": "Copy the REDIS_URL from database details",
@@ -598,6 +677,18 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 FastMCP Memory Server Starting...")
     print("=" * 60)
+    
+    # Authentication Status
+    if auth_provider:
+        print(f"🔐 Authentication: ENABLED (Google OAuth)")
+        print(f"🌐 Base URL: {BASE_URL}")
+    else:
+        print(f"🔓 Authentication: DISABLED")
+        print(f"💡 Add Google OAuth credentials to enable authentication")
+    
+    print("=" * 60)
+    
+    # Storage Status
     print(f"📦 Storage Type: {STORAGE_TYPE}")
     
     if redis_client:
