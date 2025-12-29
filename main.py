@@ -4,11 +4,6 @@ import os
 from typing import Optional
 from datetime import datetime
 
-# Initialize FastMCP (Auth will be configured via environment variables)
-# Set these in FastMCP Cloud Configuration:
-# FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider
-# FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-# FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=GOCSPX-your-secret
 mcp = FastMCP("memory")
 
 # ------------------------------
@@ -412,18 +407,11 @@ def get_server_status() -> dict:
     
     redis_status = "Connected ✓" if redis_client else "Not Connected ✗"
     
-    # Check if Google Auth is configured
-    google_auth_configured = bool(
-        os.getenv("FASTMCP_SERVER_AUTH") and 
-        os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
-    )
-    
     return {
         "storage_type": STORAGE_TYPE,
         "redis_status": redis_status,
         "redis_url_configured": os.getenv("REDIS_URL") is not None,
         "persistent": redis_client is not None,
-        "google_auth_enabled": google_auth_configured,
         "memories_count": len(memories),
         "memory_tags_count": len(memory_tags),
         "memory_tags": memory_tags,
@@ -461,25 +449,9 @@ def get_help_documentation() -> dict:
     Example:
         get_help_documentation()
     """
-    google_auth_configured = bool(
-        os.getenv("FASTMCP_SERVER_AUTH") and 
-        os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
-    )
-    
     return {
         "server_name": "Memory MCP Server",
         "version": "1.0.0",
-        "authentication": {
-            "google_oauth_enabled": google_auth_configured,
-            "setup_instructions": [
-                "1. Create OAuth app at https://console.cloud.google.com",
-                "2. Add redirect URI: https://your-server.fastmcp.app/oauth/callback",
-                "3. Set environment variables:",
-                "   FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider",
-                "   FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=your-id",
-                "   FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=your-secret"
-            ] if not google_auth_configured else None
-        },
         "storage": {
             "type": STORAGE_TYPE,
             "persistent": redis_client is not None
@@ -584,19 +556,10 @@ def get_help_documentation() -> dict:
 @mcp.resource("info://server/info")
 def server_info() -> dict:
     """Get comprehensive information about the MCP server."""
-    google_auth_configured = bool(
-        os.getenv("FASTMCP_SERVER_AUTH") and 
-        os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
-    )
-    
     return {
         "name": "memory",
         "version": "1.0.0",
-        "description": "Memory-Based MCP Server with Persistent Storage and Google OAuth",
-        "authentication": {
-            "google_oauth_enabled": google_auth_configured,
-            "provider": "Google OAuth 2.0" if google_auth_configured else "None"
-        },
+        "description": "Memory-Based MCP Server with Persistent Storage",
         "storage": {
             "type": STORAGE_TYPE,
             "persistent": redis_client is not None,
@@ -617,30 +580,14 @@ def server_info() -> dict:
             "get_help_documentation"
         ],
         "setup_instructions": {
-            "redis": {
-                "step_1": "Sign up at https://upstash.com (FREE tier available)",
-                "step_2": "Create a new Redis database",
-                "step_3": "Copy the REDIS_URL from database details",
-                "step_4": "Add REDIS_URL to environment variables",
-                "step_5": "Redeploy your server",
-                "note": "Free tier includes 10,000 commands/day with permanent storage"
-            } if not redis_client else {
-                "status": "✅ Redis configured - using permanent storage"
-            },
-            "google_auth": {
-                "step_1": "Visit https://console.cloud.google.com",
-                "step_2": "Create OAuth 2.0 Client ID",
-                "step_3": "Add redirect URI: https://your-server.fastmcp.app/oauth/callback",
-                "step_4": "Set environment variables in Configuration tab",
-                "step_5": "Redeploy your server",
-                "required_env_vars": [
-                    "FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider",
-                    "FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=your-client-id",
-                    "FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=your-secret"
-                ]
-            } if not google_auth_configured else {
-                "status": "✅ Google OAuth configured and enabled"
-            }
+            "step_1": "Sign up at https://upstash.com (FREE tier available)",
+            "step_2": "Create a new Redis database",
+            "step_3": "Copy the REDIS_URL from database details",
+            "step_4": "Add REDIS_URL to environment variables",
+            "step_5": "Redeploy your server",
+            "note": "Free tier includes 10,000 commands/day with permanent storage"
+        } if not redis_client else {
+            "status": "✅ Redis configured - using permanent storage"
         }
     }
 
@@ -652,24 +599,6 @@ if __name__ == "__main__":
     print("🚀 FastMCP Memory Server Starting...")
     print("=" * 60)
     print(f"📦 Storage Type: {STORAGE_TYPE}")
-    
-    # Check Google Auth status
-    google_auth_configured = bool(
-        os.getenv("FASTMCP_SERVER_AUTH") and 
-        os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
-    )
-    
-    if google_auth_configured:
-        print(f"🔐 Google OAuth: ENABLED")
-        print(f"✅ Authentication: Protected with Google Sign-In")
-    else:
-        print(f"⚠️  Google OAuth: NOT CONFIGURED")
-        print(f"💡 To enable Google authentication:")
-        print(f"   1. Visit: https://console.cloud.google.com")
-        print(f"   2. Create OAuth 2.0 Client ID")
-        print(f"   3. Set environment variables in Configuration tab")
-    
-    print("=" * 60)
     
     if redis_client:
         print(f"✅ Redis Status: Connected")
