@@ -1,11 +1,14 @@
 [project]
 name = "mcp-server"
-version = "0.1.0"
-description = "Memory-Based MCP Server with Firebase Integration"
+version = "1.0.0"
+description = "Memory-Based MCP Server with Google OAuth Authentication"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "fastmcp>=2.14.1",
-    "firebase-admin>=6.5.0",
+    "fastmcp[all]>=2.14.1",
     "python-dotenv>=1.0.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
