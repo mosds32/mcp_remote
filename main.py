@@ -39,7 +39,7 @@ else:
 # Initialize FastMCP with or without authentication
 mcp = FastMCP(
     name="memory",
-    auth=None  # Will be None if credentials not configured
+    auth=auth_provider  # Will be None if credentials not configured
 )
 
 # ------------------------------
