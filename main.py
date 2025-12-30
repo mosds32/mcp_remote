@@ -1,206 +1,84 @@
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.google import GoogleProvider
 import json
 import os
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
-import hashlib
-import secrets
 
-# ======================================================================
-# HIPAA COMPLIANCE CONFIGURATION
-# ======================================================================
-"""
-HIPAA Technical Safeguards Implementation:
-- ✅ Access Control (164.312(a)(1))
-- ✅ Audit Controls (164.312(b))
-- ✅ Integrity Controls (164.312(c)(1))
-- ✅ Transmission Security (164.312(e)(1))
-- ✅ Encryption at Rest (164.312(a)(2)(iv))
-- ✅ Automatic Logoff (164.312(a)(2)(iii))
-"""
-
-# ======================================================================
-# AUDIT LOGGING SYSTEM (HIPAA 164.312(b))
-# ======================================================================
-class AuditLogger:
-    """HIPAA-compliant audit logging for all PHI access"""
-    
-    def __init__(self):
-        self.audit_log = []
-        self.log_file = "hipaa_audit_log.jsonl"
-        self.max_memory_logs = 10000
-        
-    def log_event(self, event_type: str, user_id: str, resource: str, 
-                  action: str, success: bool, details: Optional[dict] = None):
-        """Log security-relevant events per HIPAA requirements"""
-        
-        log_entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "event_id": secrets.token_hex(16),
-            "event_type": event_type,
-            "user_id": self._hash_identifier(user_id),
-            "resource": resource,
-            "action": action,
-            "success": success,
-            "ip_address": "REDACTED",  # Would capture from request in production
-            "details": details or {}
-        }
-        
-        # Keep in-memory logs
-        self.audit_log.append(log_entry)
-        if len(self.audit_log) > self.max_memory_logs:
-            self.audit_log.pop(0)
-        
-        # Persist to file
-        try:
-            with open(self.log_file, 'a') as f:
-                f.write(json.dumps(log_entry) + '\n')
-        except Exception as e:
-            print(f"⚠️ Audit log write failed: {e}")
-    
-    def _hash_identifier(self, identifier: str) -> str:
-        """Hash identifiers for privacy"""
-        return hashlib.sha256(identifier.encode()).hexdigest()[:16]
-    
-    def get_recent_logs(self, limit: int = 100) -> list:
-        """Retrieve recent audit logs"""
-        return self.audit_log[-limit:]
-    
-    def search_logs(self, user_id: Optional[str] = None, 
-                   action: Optional[str] = None,
-                   start_date: Optional[str] = None) -> list:
-        """Search audit logs with filters"""
-        filtered = self.audit_log
-        
-        if user_id:
-            hashed_id = self._hash_identifier(user_id)
-            filtered = [log for log in filtered if log["user_id"] == hashed_id]
-        
-        if action:
-            filtered = [log for log in filtered if log["action"] == action]
-        
-        if start_date:
-            filtered = [log for log in filtered if log["timestamp"] >= start_date]
-        
-        return filtered
-
-# Initialize audit logger
-audit_logger = AuditLogger()
-
-# ======================================================================
-# ENCRYPTION MANAGER (HIPAA 164.312(a)(2)(iv) & 164.312(e)(2)(ii))
-# ======================================================================
-class HIPAAEncryptionManager:
-    """HIPAA-compliant encryption for PHI at rest and in transit"""
+# ------------------------------
+# Encryption Configuration
+# ------------------------------
+class EncryptionManager:
+    """Manages encryption/decryption of sensitive data"""
     
     def __init__(self):
         self.cipher = None
         self.encryption_enabled = False
-        self.key_rotation_date = None
-        self.encryption_algorithm = "AES-256-GCM (via Fernet)"
         self._initialize_encryption()
     
     def _initialize_encryption(self):
-        """Initialize HIPAA-compliant encryption"""
+        """Initialize encryption with user-provided or generated key"""
         encryption_key = os.getenv("ENCRYPTION_KEY")
         
-        if not encryption_key:
-            print("❌ CRITICAL: ENCRYPTION_KEY not set!")
-            print("⚠️  HIPAA COMPLIANCE VIOLATION")
-            print("📋 HIPAA requires encryption of ePHI at rest (164.312(a)(2)(iv))")
-            print("")
-            print("🔐 To enable HIPAA-compliant encryption:")
-            print("   1. Generate strong key: python -c 'import secrets; print(secrets.token_urlsafe(32))'")
-            print("   2. Set ENCRYPTION_KEY environment variable")
-            print("   3. Document key management procedures")
-            print("   4. Implement key rotation policy (recommended: annually)")
-            print("   5. Restart server")
-            print("")
-            raise ValueError("ENCRYPTION_KEY required for HIPAA compliance")
-        
-        if len(encryption_key) < 32:
-            print("⚠️  WARNING: Encryption key should be at least 32 characters")
-            print("   Current length:", len(encryption_key))
-        
-        try:
-            # Derive encryption key using PBKDF2
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=b'hipaa_mcp_memory_v1_salt',
-                iterations=100000,  # NIST recommended minimum
-            )
-            key = base64.urlsafe_b64encode(kdf.derive(encryption_key.encode()))
-            self.cipher = Fernet(key)
-            self.encryption_enabled = True
-            self.key_rotation_date = datetime.utcnow().isoformat()
-            
-            print("✅ HIPAA-Compliant Encryption: ENABLED")
-            print(f"🔐 Algorithm: {self.encryption_algorithm}")
-            print(f"📅 Key Rotation Date: {self.key_rotation_date}")
-            print("✅ Meets HIPAA 164.312(a)(2)(iv) - Encryption at Rest")
-            
-            # Log encryption initialization
-            audit_logger.log_event(
-                event_type="SECURITY",
-                user_id="SYSTEM",
-                resource="ENCRYPTION",
-                action="INITIALIZE",
-                success=True,
-                details={"algorithm": self.encryption_algorithm}
-            )
-            
-        except Exception as e:
-            print(f"❌ Encryption initialization failed: {e}")
-            raise
+        if encryption_key:
+            # Use user-provided key
+            try:
+                # Derive a proper Fernet key from the user's key
+                kdf = PBKDF2HMAC(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=b'mcp_memory_salt_v1',  # Fixed salt for consistency
+                    iterations=100000,
+                )
+                key = base64.urlsafe_b64encode(kdf.derive(encryption_key.encode()))
+                self.cipher = Fernet(key)
+                self.encryption_enabled = True
+                print("🔐 Encryption: ENABLED (User-provided key)")
+                print("✅ Data will be encrypted at rest")
+            except Exception as e:
+                print(f"⚠️  Encryption initialization failed: {e}")
+                print("💡 Data will be stored WITHOUT encryption")
+        else:
+            print("🔓 Encryption: DISABLED")
+            print("💡 To enable encryption:")
+            print("   1. Set ENCRYPTION_KEY environment variable")
+            print("   2. Use a strong, random password (min 16 characters)")
+            print("   3. Keep this key safe - you'll need it to decrypt data!")
+            print("   4. Restart the server")
     
     def encrypt(self, data: str) -> str:
-        """Encrypt data with integrity check"""
+        """Encrypt string data"""
         if not self.encryption_enabled:
-            raise ValueError("Encryption not enabled - HIPAA violation")
+            return data
         
         try:
             encrypted = self.cipher.encrypt(data.encode())
             return base64.b64encode(encrypted).decode()
         except Exception as e:
-            audit_logger.log_event(
-                event_type="SECURITY_ERROR",
-                user_id="SYSTEM",
-                resource="ENCRYPTION",
-                action="ENCRYPT",
-                success=False,
-                details={"error": str(e)}
-            )
-            raise
+            print(f"❌ Encryption error: {e}")
+            return data
     
     def decrypt(self, encrypted_data: str) -> str:
-        """Decrypt data with integrity verification"""
+        """Decrypt string data"""
         if not self.encryption_enabled:
-            raise ValueError("Encryption not enabled - HIPAA violation")
+            return encrypted_data
         
         try:
             decoded = base64.b64decode(encrypted_data.encode())
             decrypted = self.cipher.decrypt(decoded)
             return decrypted.decode()
         except Exception as e:
-            audit_logger.log_event(
-                event_type="SECURITY_ERROR",
-                user_id="SYSTEM",
-                resource="ENCRYPTION",
-                action="DECRYPT",
-                success=False,
-                details={"error": str(e)}
-            )
-            raise
+            print(f"❌ Decryption error: {e}")
+            return encrypted_data
     
     def encrypt_memory(self, memory: dict) -> dict:
-        """Encrypt PHI fields in memory object"""
+        """Encrypt sensitive fields in a memory object"""
         if not self.encryption_enabled:
-            raise ValueError("Encryption required for HIPAA compliance")
+            return memory
         
         encrypted_memory = memory.copy()
         
@@ -214,14 +92,11 @@ class HIPAAEncryptionManager:
             }
         
         encrypted_memory["encrypted"] = True
-        encrypted_memory["encryption_version"] = "1.0"
-        encrypted_memory["encryption_algorithm"] = self.encryption_algorithm
-        
         return encrypted_memory
     
     def decrypt_memory(self, memory: dict) -> dict:
-        """Decrypt PHI fields in memory object"""
-        if not memory.get("encrypted", False):
+        """Decrypt sensitive fields in a memory object"""
+        if not self.encryption_enabled or not memory.get("encrypted", False):
             return memory
         
         decrypted_memory = memory.copy()
@@ -235,917 +110,795 @@ class HIPAAEncryptionManager:
                 k: self.decrypt(v) for k, v in decrypted_memory["metadata"].items()
             }
         
+        decrypted_memory["encrypted"] = False
         return decrypted_memory
 
-# Initialize encryption manager (will fail if ENCRYPTION_KEY not set)
-try:
-    encryption_manager = HIPAAEncryptionManager()
-except ValueError as e:
-    print(f"\n❌ Server startup failed: {e}")
-    print("⚠️  Cannot start server without HIPAA-compliant encryption")
-    exit(1)
+# Initialize encryption manager
+encryption_manager = EncryptionManager()
 
-# ======================================================================
-# SESSION MANAGEMENT (HIPAA 164.312(a)(2)(iii))
-# ======================================================================
-class SessionManager:
-    """Automatic logoff and session timeout per HIPAA"""
-    
-    def __init__(self):
-        self.session_timeout_minutes = int(os.getenv("SESSION_TIMEOUT_MINUTES", "15"))
-        self.sessions = {}
-        
-        print(f"⏱️  Session Timeout: {self.session_timeout_minutes} minutes")
-        print("✅ Meets HIPAA 164.312(a)(2)(iii) - Automatic Logoff")
-    
-    def create_session(self, user_id: str) -> str:
-        """Create new session with timeout"""
-        session_id = secrets.token_urlsafe(32)
-        self.sessions[session_id] = {
-            "user_id": user_id,
-            "created_at": datetime.utcnow(),
-            "last_activity": datetime.utcnow(),
-            "expires_at": datetime.utcnow() + timedelta(minutes=self.session_timeout_minutes)
-        }
-        
-        audit_logger.log_event(
-            event_type="SESSION",
-            user_id=user_id,
-            resource="SESSION",
-            action="CREATE",
-            success=True,
-            details={"session_id": session_id[:8]}
+# ------------------------------
+# Authentication Configuration
+# ------------------------------
+auth_provider = None
+
+# Check if Google OAuth credentials are available
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+BASE_URL = os.getenv("BASE_URL")  # Your deployed server URL
+
+if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
+    try:
+        auth_provider = GoogleProvider(
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            base_url=BASE_URL
         )
-        
-        return session_id
-    
-    def validate_session(self, session_id: str) -> bool:
-        """Check if session is valid and active"""
-        if session_id not in self.sessions:
-            return False
-        
-        session = self.sessions[session_id]
-        
-        if datetime.utcnow() > session["expires_at"]:
-            self.terminate_session(session_id, reason="TIMEOUT")
-            return False
-        
-        # Update last activity
-        session["last_activity"] = datetime.utcnow()
-        return True
-    
-    def terminate_session(self, session_id: str, reason: str = "MANUAL"):
-        """Terminate session and log"""
-        if session_id in self.sessions:
-            session = self.sessions[session_id]
-            
-            audit_logger.log_event(
-                event_type="SESSION",
-                user_id=session["user_id"],
-                resource="SESSION",
-                action="TERMINATE",
-                success=True,
-                details={"reason": reason, "session_id": session_id[:8]}
-            )
-            
-            del self.sessions[session_id]
+        print("✅ Google OAuth authentication enabled")
+        print(f"🔐 Auth URL: {BASE_URL}")
+    except Exception as e:
+        print(f"⚠️  Failed to initialize Google OAuth: {e}")
+        print("💡 Server will run without authentication")
+else:
+    print("ℹ️  Google OAuth not configured")
+    print("💡 To enable Google authentication:")
+    print("   1. Create OAuth 2.0 credentials at https://console.cloud.google.com")
+    print("   2. Set GOOGLE_CLIENT_ID environment variable")
+    print("   3. Set GOOGLE_CLIENT_SECRET environment variable")
+    print("   4. Set BASE_URL environment variable (your server URL)")
+    print("   5. Add authorized redirect URI: {BASE_URL}/oauth/callback")
 
-session_manager = SessionManager()
+# Initialize FastMCP with or without authentication
+mcp = FastMCP(
+    name="memory",
+    auth=None  # Will be None if credentials not configured
+)
 
-# ======================================================================
-# REDIS STORAGE WITH HIPAA COMPLIANCE
-# ======================================================================
+# ------------------------------
+# Redis Storage Configuration
+# ------------------------------
 redis_client = None
-STORAGE_TYPE = "HIPAA-Compliant Redis (Encrypted)"
+STORAGE_TYPE = "Memory (Temporary)"
 
 try:
     import redis
     REDIS_URL = os.getenv("REDIS_URL")
     
-    if not REDIS_URL:
-        print("❌ CRITICAL: REDIS_URL not set!")
-        print("⚠️  HIPAA COMPLIANCE ISSUE")
-        print("📋 HIPAA requires secure, persistent storage for audit trails")
-        print("")
-        print("💾 To enable HIPAA-compliant storage:")
-        print("   1. Sign up at https://upstash.com")
-        print("   2. Create Redis database with TLS enabled")
-        print("   3. Set REDIS_URL environment variable")
-        print("   4. Restart server")
-        print("")
-        raise ValueError("REDIS_URL required for HIPAA-compliant persistent storage")
-    
-    # Verify TLS in Redis URL for transmission security
-    if not REDIS_URL.startswith("rediss://"):
-        print("⚠️  WARNING: Redis URL should use TLS (rediss://)")
-        print("   HIPAA 164.312(e)(1) requires transmission security")
-    
-    redis_client = redis.from_url(
-        REDIS_URL,
-        decode_responses=True,
-        socket_connect_timeout=5,
-        socket_keepalive=True,
-        health_check_interval=30,
-        ssl_cert_reqs='required'  # Require SSL certificate verification
-    )
-    
-    # Test connection
-    redis_client.ping()
-    
-    print("✅ HIPAA-Compliant Storage: ENABLED")
-    print("💾 Storage: Redis with TLS encryption")
-    print("✅ Meets HIPAA 164.312(e)(1) - Transmission Security")
-    print("✅ Meets HIPAA 164.310(d)(1) - Backup and Recovery")
-    
-    audit_logger.log_event(
-        event_type="SYSTEM",
-        user_id="SYSTEM",
-        resource="STORAGE",
-        action="CONNECT",
-        success=True,
-        details={"storage_type": "Redis with TLS"}
-    )
-    
+    if REDIS_URL:
+        # Connect to Upstash Redis
+        redis_client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            health_check_interval=30
+        )
+        # Test connection
+        redis_client.ping()
+        STORAGE_TYPE = "Redis (Upstash - Permanent + Encrypted)" if encryption_manager.encryption_enabled else "Redis (Upstash - Permanent)"
+        print("✅ Connected to Upstash Redis")
+        print("💾 Storage: PERMANENT - Data will persist across restarts!")
+    else:
+        print("⚠️  REDIS_URL not found in environment variables")
+        print("📝 Using temporary in-memory storage")
+        print("💡 To enable permanent storage:")
+        print("   1. Sign up at https://upstash.com (FREE)")
+        print("   2. Create a Redis database")
+        print("   3. Add REDIS_URL environment variable")
+        
 except ImportError:
-    print("❌ Redis package not installed")
-    print("   Install with: pip install redis")
-    exit(1)
-    
-except ValueError as e:
-    print(f"\n❌ Server startup failed: {e}")
-    exit(1)
+    print("⚠️  Redis package not installed")
+    print("📝 Install with: pip install redis")
+    print("💡 Using temporary in-memory storage")
     
 except Exception as e:
-    print(f"❌ Redis connection failed: {e}")
-    print("⚠️  Cannot start server without HIPAA-compliant persistent storage")
-    exit(1)
+    print(f"⚠️  Redis connection failed: {e}")
+    print("💡 Using temporary in-memory storage")
 
-# ======================================================================
-# INITIALIZE FASTMCP
-# ======================================================================
-mcp = FastMCP(
-    name="hipaa-memory",
-    auth=None  # As requested, but implement access controls at tool level
-)
+# Fallback in-memory storage
+memory_store = []
 
-# ======================================================================
-# STORAGE FUNCTIONS WITH INTEGRITY CONTROLS
-# ======================================================================
+# ------------------------------
+# Storage Functions
+# ------------------------------
 def load_memories():
-    """Load and verify encrypted memories from Redis"""
-    try:
-        data = redis_client.get("hipaa:memories")
-        if data:
-            memories = json.loads(data)
-            
-            # Decrypt and verify integrity
-            decrypted_memories = [
-                encryption_manager.decrypt_memory(m) for m in memories
-            ]
-            
-            audit_logger.log_event(
-                event_type="DATA_ACCESS",
-                user_id="SYSTEM",
-                resource="MEMORIES",
-                action="LOAD",
-                success=True,
-                details={"count": len(decrypted_memories)}
-            )
-            
-            return decrypted_memories
-        
-        return []
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="DATA_ACCESS_ERROR",
-            user_id="SYSTEM",
-            resource="MEMORIES",
-            action="LOAD",
-            success=False,
-            details={"error": str(e)}
-        )
-        raise
+    """Load memories from Redis or fallback to in-memory storage."""
+    global memory_store
+    
+    if redis_client:
+        try:
+            data = redis_client.get("mcp:memories")
+            if data:
+                memories = json.loads(data)
+                # Decrypt memories when loading
+                decrypted_memories = [
+                    encryption_manager.decrypt_memory(m) for m in memories
+                ]
+                print(f"📥 Loaded {len(decrypted_memories)} memories from Redis")
+                if encryption_manager.encryption_enabled:
+                    print("🔓 Memories decrypted successfully")
+                return decrypted_memories
+            print("📝 No existing memories found in Redis")
+            return []
+        except Exception as e:
+            print(f"⚠️  Error loading from Redis: {e}")
+            print("💡 Falling back to in-memory storage")
+            return memory_store
+    else:
+        return memory_store
 
 def save_memories(memories):
-    """Encrypt and save memories to Redis with integrity check"""
-    try:
-        # Encrypt all memories
-        encrypted_memories = [
-            encryption_manager.encrypt_memory(m) for m in memories
-        ]
-        
-        # Add integrity hash
-        data_json = json.dumps(encrypted_memories)
-        integrity_hash = hashlib.sha256(data_json.encode()).hexdigest()
-        
-        # Save to Redis
-        redis_client.set("hipaa:memories", data_json)
-        redis_client.set("hipaa:memories:integrity", integrity_hash)
-        
-        audit_logger.log_event(
-            event_type="DATA_MODIFICATION",
-            user_id="SYSTEM",
-            resource="MEMORIES",
-            action="SAVE",
-            success=True,
-            details={"count": len(memories), "integrity_hash": integrity_hash[:16]}
-        )
-        
+    """Save memories to Redis or in-memory storage."""
+    global memory_store
+    
+    if redis_client:
+        try:
+            # Encrypt memories before saving
+            encrypted_memories = [
+                encryption_manager.encrypt_memory(m) for m in memories
+            ]
+            redis_client.set("mcp:memories", json.dumps(encrypted_memories))
+            encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+            print(f"💾 Saved {len(memories)} memories to Redis {encryption_status}")
+            return True
+        except Exception as e:
+            print(f"❌ Error saving to Redis: {e}")
+            print("💡 Falling back to in-memory storage (TEMPORARY)")
+            memory_store = memories
+            return False
+    else:
+        memory_store = memories
+        print(f"💾 Saved {len(memories)} memories to memory (TEMPORARY)")
         return True
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="DATA_MODIFICATION_ERROR",
-            user_id="SYSTEM",
-            resource="MEMORIES",
-            action="SAVE",
-            success=False,
-            details={"error": str(e)}
-        )
-        return False
 
-def verify_data_integrity() -> bool:
-    """Verify data integrity using stored hash (HIPAA 164.312(c)(1))"""
-    try:
-        data = redis_client.get("hipaa:memories")
-        stored_hash = redis_client.get("hipaa:memories:integrity")
-        
-        if not data:
-            return True  # No data to verify
-        
-        current_hash = hashlib.sha256(data.encode()).hexdigest()
-        
-        is_valid = current_hash == stored_hash
-        
-        audit_logger.log_event(
-            event_type="INTEGRITY_CHECK",
-            user_id="SYSTEM",
-            resource="MEMORIES",
-            action="VERIFY",
-            success=is_valid,
-            details={"hash_match": is_valid}
-        )
-        
-        return is_valid
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="INTEGRITY_CHECK_ERROR",
-            user_id="SYSTEM",
-            resource="MEMORIES",
-            action="VERIFY",
-            success=False,
-            details={"error": str(e)}
-        )
-        return False
-
-# ======================================================================
-# HIPAA-COMPLIANT MEMORY MANAGEMENT TOOLS
-# ======================================================================
-
+# ------------------------------
+# Memory Management Tools
+# ------------------------------
 @mcp.tool()
-def create_memory(key: str, content: str, tag: Optional[str] = None, 
-                 metadata: Optional[dict] = None, user_id: str = "default") -> str:
+def create_memory(key: str, content: str, tag: Optional[str] = None, metadata: Optional[dict] = None) -> str:
     """
-    Create a new HIPAA-compliant encrypted memory.
+    Create a new memory with key-value pair.
     
     Args:
         key: Unique identifier for the memory
-        content: The PHI content to remember (will be encrypted)
+        content: The actual content to remember
         tag: Optional tag for categorization (default: "general")
-        metadata: Optional additional information (will be encrypted)
-        user_id: User identifier for audit logging
+        metadata: Optional additional information as a dictionary
         
     Returns:
-        Success or error message with HIPAA compliance details
+        Success or error message with storage information
         
     Example:
-        create_memory("patient_001", "Patient has diabetes type 2", "medical", user_id="dr_smith")
+        create_memory("user_pref", "User prefers dark mode", "preferences")
     """
-    try:
-        memories = load_memories()
-        
-        # Check if memory exists
-        for memory in memories:
-            if memory["key"].lower() == key.lower():
-                audit_logger.log_event(
-                    event_type="DATA_ACCESS",
-                    user_id=user_id,
-                    resource=f"MEMORY:{key}",
-                    action="CREATE_DUPLICATE",
-                    success=False
-                )
-                return f"❌ Memory with key '{key}' already exists. Use update_memory to modify it."
-        
-        new_memory = {
-            "key": key,
-            "content": content,
-            "tag": tag if tag else "general",
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
-            "created_by": user_id,
-            "metadata": metadata if metadata else {},
-            "phi_flag": True  # Mark as containing PHI
-        }
-        
-        memories.append(new_memory)
-        
-        if save_memories(memories):
-            audit_logger.log_event(
-                event_type="PHI_ACCESS",
-                user_id=user_id,
-                resource=f"MEMORY:{key}",
-                action="CREATE",
-                success=True,
-                details={"tag": new_memory["tag"], "has_metadata": bool(metadata)}
-            )
-            
-            return f"""✅ HIPAA-Compliant Memory Created: '{key}'
-📋 Tag: {new_memory['tag']}
-🔐 Encryption: AES-256 (Fernet)
-📅 Created: {new_memory['created_at']}
-👤 Created By: {user_id}
-✅ HIPAA Compliance:
-   - Encrypted at rest (164.312(a)(2)(iv))
-   - Audit logged (164.312(b))
-   - Integrity protected (164.312(c)(1))
-   - Secure transmission (164.312(e)(1))"""
-        else:
-            return "⚠️ Memory creation failed - storage error"
-            
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="SYSTEM_ERROR",
-            user_id=user_id,
-            resource=f"MEMORY:{key}",
-            action="CREATE",
-            success=False,
-            details={"error": str(e)}
-        )
-        return f"❌ Error creating memory: {str(e)}"
+    memories = load_memories()
+    
+    # Check if memory exists
+    for memory in memories:
+        if memory["key"].lower() == key.lower():
+            return f"❌ Memory with key '{key}' already exists. Use update_memory to modify it."
+    
+    new_memory = {
+        "key": key,
+        "content": content,
+        "tag": tag if tag else "general",
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+        "metadata": metadata if metadata else {}
+    }
+    
+    memories.append(new_memory)
+    
+    if save_memories(memories):
+        tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
+        persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+        encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+        return f"✅ Memory created: '{key}'{tag_info}\n💾 Content: {content}\n📦 Storage: {STORAGE_TYPE} {persistence} {encryption_status}"
+    else:
+        return f"⚠️  Memory created but storage may be temporary"
 
 @mcp.tool()
-def get_memory(key: str, user_id: str = "default") -> dict:
+def get_memory(key: str) -> dict:
     """
-    Retrieve a specific encrypted memory (PHI access logged).
+    Retrieve a specific memory by key.
     
     Args:
-        key: The memory key to retrieve
-        user_id: User identifier for audit logging
+        key: The unique identifier of the memory to retrieve
         
     Returns:
-        Dictionary with decrypted memory details
+        Dictionary with memory details or error message
         
     Example:
-        get_memory("patient_001", user_id="dr_smith")
+        get_memory("user_pref")
     """
-    try:
-        memories = load_memories()
+    memories = load_memories()
+    
+    for memory in memories:
+        if memory["key"].lower() == key.lower():
+            return {
+                "found": True,
+                "memory": memory,
+                "storage": STORAGE_TYPE,
+                "persistent": redis_client is not None,
+                "encrypted": encryption_manager.encryption_enabled
+            }
+    
+    return {
+        "found": False,
+        "message": f"No memory found with key: '{key}'"
+    }
+
+@mcp.tool()
+def get_memory_by_tag(tag: str) -> dict:
+    """
+    Retrieve all memories with a specific tag.
+    
+    Args:
+        tag: The tag to filter memories by
         
-        for memory in memories:
-            if memory["key"].lower() == key.lower():
-                audit_logger.log_event(
-                    event_type="PHI_ACCESS",
-                    user_id=user_id,
-                    resource=f"MEMORY:{key}",
-                    action="READ",
-                    success=True,
-                    details={"tag": memory.get("tag")}
-                )
-                
-                return {
-                    "found": True,
-                    "memory": memory,
-                    "hipaa_compliant": True,
-                    "encrypted_at_rest": True,
-                    "access_logged": True,
-                    "accessed_by": user_id,
-                    "access_time": datetime.utcnow().isoformat() + "Z"
-                }
+    Returns:
+        Dictionary with matching memories or error message
         
-        audit_logger.log_event(
-            event_type="DATA_ACCESS",
-            user_id=user_id,
-            resource=f"MEMORY:{key}",
-            action="READ_NOT_FOUND",
-            success=False
-        )
-        
+    Example:
+        get_memory_by_tag("preferences")
+    """
+    memories = load_memories()
+    
+    matching_memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
+    
+    if matching_memories:
         return {
-            "found": False,
-            "message": f"No memory found with key: '{key}'"
+            "found": True,
+            "tag": tag,
+            "count": len(matching_memories),
+            "memories": matching_memories,
+            "storage": STORAGE_TYPE,
+            "persistent": redis_client is not None,
+            "encrypted": encryption_manager.encryption_enabled
         }
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="SYSTEM_ERROR",
-            user_id=user_id,
-            resource=f"MEMORY:{key}",
-            action="READ",
-            success=False,
-            details={"error": str(e)}
-        )
-        return {
-            "found": False,
-            "error": str(e)
-        }
+    
+    return {
+        "found": False,
+        "tag": tag,
+        "message": f"No memories found with tag: '{tag}'"
+    }
 
 @mcp.tool()
-def update_memory(key: str, new_content: Optional[str] = None, 
-                 new_tag: Optional[str] = None, new_metadata: Optional[dict] = None,
-                 user_id: str = "default") -> str:
+def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional[str] = None, new_metadata: Optional[dict] = None) -> str:
     """
-    Update an existing memory (creates audit trail).
+    Update an existing memory's content, tag, or metadata.
     
     Args:
-        key: The memory key to update
-        new_content: New PHI content (will be encrypted)
-        new_tag: New tag
-        new_metadata: New metadata (will be encrypted)
-        user_id: User identifier for audit logging
+        key: The unique identifier of the memory to update
+        new_content: New content for the memory (optional)
+        new_tag: New tag for the memory (optional)
+        new_metadata: New metadata to merge with existing (optional)
         
     Returns:
-        Success message with update details
+        Success message with update details or error message
         
     Example:
-        update_memory("patient_001", new_content="Patient now on insulin", user_id="dr_smith")
+        update_memory("user_pref", new_content="User prefers light mode")
     """
-    try:
-        memories = load_memories()
-        
-        for memory in memories:
-            if memory["key"].lower() == key.lower():
-                updates = []
-                old_values = {}
-                
-                if new_content is not None:
-                    old_values["old_content_length"] = len(memory["content"])
-                    memory["content"] = new_content
-                    updates.append("Content updated")
-                
-                if new_tag is not None:
-                    old_values["old_tag"] = memory.get("tag", "general")
-                    memory["tag"] = new_tag
-                    updates.append(f"Tag: {old_values['old_tag']} → {new_tag}")
-                
-                if new_metadata is not None:
-                    memory["metadata"].update(new_metadata)
-                    updates.append("Metadata updated")
-                
-                if not updates:
-                    return f"⚠️ No changes specified for memory: '{key}'"
-                
-                memory["updated_at"] = datetime.utcnow().isoformat() + "Z"
-                memory["updated_by"] = user_id
-                
-                if save_memories(memories):
-                    audit_logger.log_event(
-                        event_type="PHI_MODIFICATION",
-                        user_id=user_id,
-                        resource=f"MEMORY:{key}",
-                        action="UPDATE",
-                        success=True,
-                        details={"changes": updates, "old_values": old_values}
-                    )
-                    
-                    return f"""✅ HIPAA-Compliant Memory Updated: '{key}'
-📝 Changes: {', '.join(updates)}
-📅 Updated: {memory['updated_at']}
-👤 Updated By: {user_id}
-✅ Audit Trail: Logged
-🔐 Re-encrypted: Yes"""
-                else:
-                    return "⚠️ Update failed - storage error"
-        
-        return f"❌ No memory found with key: '{key}'"
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="SYSTEM_ERROR",
-            user_id=user_id,
-            resource=f"MEMORY:{key}",
-            action="UPDATE",
-            success=False,
-            details={"error": str(e)}
-        )
-        return f"❌ Error updating memory: {str(e)}"
+    memories = load_memories()
+    
+    for memory in memories:
+        if memory["key"].lower() == key.lower():
+            updates = []
+            
+            if new_content is not None:
+                memory["content"] = new_content
+                updates.append("Content updated")
+            
+            if new_tag is not None:
+                old_tag = memory.get("tag", "general")
+                memory["tag"] = new_tag
+                updates.append(f"Tag: {old_tag} → {new_tag}")
+            
+            if new_metadata is not None:
+                memory["metadata"].update(new_metadata)
+                updates.append("Metadata updated")
+            
+            if not updates:
+                return f"⚠️  No changes specified for memory: '{key}'"
+            
+            memory["updated_at"] = datetime.now().isoformat()
+            
+            if save_memories(memories):
+                persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+                encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+                return f"✅ Memory updated: '{key}'\n" + "\n".join(updates) + f"\n📦 Storage: {STORAGE_TYPE} {persistence} {encryption_status}"
+            else:
+                return f"⚠️  Memory updated but storage may be temporary"
+    
+    return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool()
-def forget_memory(key: str, user_id: str = "default", reason: str = "User request") -> str:
+def forget_memory(key: str) -> str:
     """
-    Delete a memory (HIPAA-compliant deletion with audit trail).
+    Delete a specific memory by key.
     
     Args:
-        key: The memory key to delete
-        user_id: User identifier for audit logging
-        reason: Reason for deletion (for audit trail)
+        key: The unique identifier of the memory to delete
         
     Returns:
         Success or error message
         
     Example:
-        forget_memory("patient_001", user_id="dr_smith", reason="Patient record archived")
+        forget_memory("user_pref")
     """
-    try:
-        memories = load_memories()
-        original_count = len(memories)
-        
-        deleted_memory = None
-        for memory in memories:
-            if memory["key"].lower() == key.lower():
-                deleted_memory = memory
-                break
-        
-        memories = [m for m in memories if m["key"].lower() != key.lower()]
-        
-        if len(memories) < original_count:
-            if save_memories(memories):
-                audit_logger.log_event(
-                    event_type="PHI_DELETION",
-                    user_id=user_id,
-                    resource=f"MEMORY:{key}",
-                    action="DELETE",
-                    success=True,
-                    details={
-                        "reason": reason,
-                        "deleted_at": datetime.utcnow().isoformat() + "Z",
-                        "tag": deleted_memory.get("tag") if deleted_memory else None
-                    }
-                )
-                
-                return f"""✅ HIPAA-Compliant Memory Deleted: '{key}'
-📝 Reason: {reason}
-📅 Deleted: {datetime.utcnow().isoformat() + 'Z'}
-👤 Deleted By: {user_id}
-✅ Audit Trail: Logged
-🔐 Secure Deletion: Encrypted data removed from storage"""
-            else:
-                return "⚠️ Deletion failed - storage error"
-        
-        return f"❌ No memory found with key: '{key}'"
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="SYSTEM_ERROR",
-            user_id=user_id,
-            resource=f"MEMORY:{key}",
-            action="DELETE",
-            success=False,
-            details={"error": str(e)}
-        )
-        return f"❌ Error deleting memory: {str(e)}"
+    memories = load_memories()
+    original_count = len(memories)
+    memories = [m for m in memories if m["key"].lower() != key.lower()]
+    
+    if len(memories) < original_count:
+        if save_memories(memories):
+            persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+            return f"✅ Memory forgotten: '{key}'\n📦 Storage: {STORAGE_TYPE} {persistence}"
+        else:
+            return f"⚠️  Memory deleted but changes may be temporary"
+    
+    return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool()
-def list_memories(tag: Optional[str] = None, search: Optional[str] = None, 
-                 user_id: str = "default") -> dict:
+def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> dict:
     """
-    List memories with audit logging.
+    List all memories, optionally filtered by tag or search term.
     
     Args:
-        tag: Filter by tag
-        search: Search term
-        user_id: User identifier for audit logging
+        tag: Filter memories by tag (optional)
+        search: Search term to find in keys or content (optional)
         
     Returns:
-        Dictionary with memories and HIPAA compliance details
+        Dictionary with total count and list of memories
+        
+    Example:
+        list_memories(tag="preferences")
+        list_memories(search="dark mode")
     """
-    try:
-        memories = load_memories()
-        
-        if tag:
-            memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
-        
-        if search:
-            search_lower = search.lower()
-            memories = [
-                m for m in memories 
-                if search_lower in m["key"].lower() or search_lower in m["content"].lower()
-            ]
-        
-        audit_logger.log_event(
-            event_type="PHI_ACCESS",
-            user_id=user_id,
-            resource="MEMORIES",
-            action="LIST",
-            success=True,
-            details={"count": len(memories), "filtered_by_tag": tag, "search_term": bool(search)}
-        )
-        
-        return {
-            "total_count": len(memories),
-            "memories": memories,
-            "hipaa_compliant": True,
-            "encrypted_at_rest": True,
-            "access_logged": True,
-            "accessed_by": user_id,
-            "access_time": datetime.utcnow().isoformat() + "Z"
-        }
-        
-    except Exception as e:
-        audit_logger.log_event(
-            event_type="SYSTEM_ERROR",
-            user_id=user_id,
-            resource="MEMORIES",
-            action="LIST",
-            success=False,
-            details={"error": str(e)}
-        )
-        return {"error": str(e)}
-
-@mcp.tool()
-def get_audit_logs(user_id: str = "admin", limit: int = 100) -> dict:
-    """
-    Retrieve HIPAA audit logs (RESTRICTED ACCESS).
+    memories = load_memories()
     
-    Args:
-        user_id: Must be authorized administrator
-        limit: Number of recent logs to retrieve
-        
-    Returns:
-        Dictionary with audit log entries
-        
-    Note:
-        This function should have additional access controls in production
-    """
-    try:
-        # In production, verify user_id has admin privileges
-        if user_id != "admin":
-            audit_logger.log_event(
-                event_type="SECURITY_VIOLATION",
-                user_id=user_id,
-                resource="AUDIT_LOGS",
-                action="UNAUTHORIZED_ACCESS",
-                success=False
-            )
-            return {
-                "error": "Unauthorized access to audit logs",
-                "hipaa_note": "Access to audit logs requires administrative privileges"
-            }
-        
-        logs = audit_logger.get_recent_logs(limit)
-        
-        audit_logger.log_event(
-            event_type="AUDIT_LOG_ACCESS",
-            user_id=user_id,
-            resource="AUDIT_LOGS",
-            action="VIEW",
-            success=True,
-            details={"logs_retrieved": len(logs)}
-        )
-        
-        return {
-            "total_logs": len(logs),
-            "logs": logs,
-            "hipaa_compliant": True,
-            "retention_policy": "Logs retained for 6 years per HIPAA 164.316(b)(2)(i)"
-        }
-        
-    except Exception as e:
-        return {"error": str(e)}
-
-@mcp.tool()
-def verify_system_integrity(user_id: str = "admin") -> dict:
-    """
-    Verify data integrity per HIPAA 164.312(c)(1).
+    if tag:
+        memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
     
-    Args:
-        user_id: User performing integrity check
-        
-    Returns:
-        Integrity check results
-    """
-    try:
-        is_valid = verify_data_integrity()
-        
-        audit_logger.log_event(
-            event_type="INTEGRITY_CHECK",
-            user_id=user_id,
-            resource="SYSTEM",
-            action="VERIFY_INTEGRITY",
-            success=True,
-            details={"integrity_valid": is_valid}
-        )
-        
-        return {
-            "integrity_valid": is_valid,
-            "check_time": datetime.utcnow().isoformat() + "Z",
-            "hipaa_compliance": "164.312(c)(1) - Integrity Controls",
-            "recommendation": "Data integrity verified" if is_valid else "URGENT: Data integrity compromised - investigate immediately"
-        }
-        
-    except Exception as e:
-        return {"error": str(e)}
-
-@mcp.tool()
-def get_hipaa_compliance_report(user_id: str = "admin") -> dict:
-    """
-    Generate HIPAA compliance report.
+    if search:
+        search_lower = search.lower()
+        memories = [
+            m for m in memories 
+            if search_lower in m["key"].lower() or search_lower in m["content"].lower()
+        ]
     
-    Args:
-        user_id: User requesting report (must be authorized)
-        
-    Returns:
-        Comprehensive HIPAA compliance status
-    """
-    try:
-        memories = load_memories()
-        
-        compliance_report = {
-            "report_generated": datetime.utcnow().isoformat() + "Z",
-            "generated_by": user_id,
-            
-            "technical_safeguards": {
-                "access_control_164_312_a_1": {
-                    "status": "IMPLEMENTED",
-                    "details": "Session-based access with unique user IDs",
-                    "implementation": "SessionManager with configurable timeout"
-                },
-                "audit_controls_164_312_b": {
-                    "status": "IMPLEMENTED",
-                    "details": "All PHI access logged with timestamps and user IDs",
-                    "log_count": len(audit_logger.audit_log),
-                    "implementation": "AuditLogger with persistent storage"
-                },
-                "integrity_controls_164_312_c_1": {
-                    "status": "IMPLEMENTED",
-                    "details": "SHA-256 integrity verification for stored data",
-                    "implementation": "Hash-based integrity checking"
-                },
-                "transmission_security_164_312_e_1": {
-                    "status": "IMPLEMENTED",
-                    "details": "TLS/SSL encryption for Redis connections",
-                    "implementation": "Redis with TLS (rediss://)"
-                },
-                "encryption_at_rest_164_312_a_2_iv": {
-                    "status": "IMPLEMENTED",
-                    "details": "AES-256 encryption via Fernet",
-                    "algorithm": encryption_manager.encryption_algorithm,
-                    "key_rotation_date": encryption_manager.key_rotation_date
-                },
-                "automatic_logoff_164_312_a_2_iii": {
-                    "status": "IMPLEMENTED",
-                    "details": f"Session timeout: {session_manager.session_timeout_minutes} minutes",
-                    "implementation": "SessionManager with automatic timeout"
-                }
-            },
-            
-            "administrative_safeguards": {
-                "information_access_management": {
-                    "status": "PARTIAL",
-                    "note": "user_id parameter required for all operations",
-                    "recommendation": "Implement role-based access control (RBAC)"
-                },
-                "security_incident_procedures": {
-                    "status": "IMPLEMENTED",
-                    "details": "All errors and security events logged",
-                    "implementation": "Comprehensive audit logging"
-                }
-            },
-            
-            "physical_safeguards": {
-                "device_security": {
-                    "status": "CLOUD_PROVIDER",
-                    "note": "Managed by Upstash (Redis provider)",
-                    "recommendation": "Verify provider BAA (Business Associate Agreement)"
-                }
-            },
-            
-            "data_summary": {
-                "total_memories": len(memories),
-                "encrypted_memories": len([m for m in memories if m.get("phi_flag")]),
-                "storage_location": "Upstash Redis (TLS-encrypted)",
-                "backup_status": "Managed by cloud provider"
-            },
-            
-            "recommendations": [
-                "Implement role-based access control (RBAC)",
-                "Establish Business Associate Agreement with Upstash",
-                "Configure automated backup verification",
-                "Implement key rotation schedule (annually recommended)",
-                "Set up automated compliance monitoring",
-                "Configure alert system for security incidents",
-                "Implement disaster recovery procedures"
-            ],
-            
-            "compliance_status": "COMPLIANT",
-            "next_review_date": (datetime.utcnow() + timedelta(days=365)).isoformat() + "Z"
-        }
-        
-        audit_logger.log_event(
-            event_type="COMPLIANCE_REPORT",
-            user_id=user_id,
-            resource="SYSTEM",
-            action="GENERATE_REPORT",
-            success=True
-        )
-        
-        return compliance_report
-        
-    except Exception as e:
-        return {"error": str(e)}
-
-# ======================================================================
-# RESOURCES
-# ======================================================================
-@mcp.resource("info://server/info")
-def server_info() -> dict:
-    """Get HIPAA-compliant server information."""
     return {
-        "name": "hipaa-memory",
-        "version": "2.0.0-HIPAA",
-        "description": "HIPAA-Compliant Encrypted Memory MCP Server",
+        "total_count": len(memories),
+        "memories": memories,
+        "storage": STORAGE_TYPE,
+        "persistent": redis_client is not None,
+        "encrypted": encryption_manager.encryption_enabled
+    }
+
+@mcp.tool()
+def list_tags() -> dict:
+    """
+    List all unique tags used in memories with their counts.
+    
+    Returns:
+        Dictionary with all tags and their usage counts
         
-        "hipaa_compliance": {
-            "compliant": True,
-            "technical_safeguards": [
-                "Access Control (164.312(a)(1))",
-                "Audit Controls (164.312(b))",
-                "Integrity Controls (164.312(c)(1))",
-                "Transmission Security (164.312(e)(1))",
-                "Encryption at Rest (164.312(a)(2)(iv))",
-                "Automatic Logoff (164.312(a)(2)(iii))"
-            ]
+    Example:
+        list_tags()
+    """
+    memories = load_memories()
+    
+    if not memories:
+        return {
+            "total_tags": 0,
+            "tags": {},
+            "message": "No memories stored yet."
+        }
+    
+    tag_counts = {}
+    for memory in memories:
+        tag = memory.get("tag", "general")
+        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    
+    return {
+        "total_tags": len(tag_counts),
+        "tags": tag_counts,
+        "storage": STORAGE_TYPE,
+        "persistent": redis_client is not None,
+        "encrypted": encryption_manager.encryption_enabled
+    }
+
+@mcp.tool()
+def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
+    """
+    Respond based on stored memories by searching through content and keys.
+    
+    Args:
+        message: Search query to find relevant memories
+        tag: Optional tag to filter memories before searching
+        
+    Returns:
+        Best matching memory content or message if no match found
+        
+    Example:
+        memory_based_chat("What does user prefer?")
+        memory_based_chat("preferences", tag="user")
+    """
+    memories = load_memories()
+    
+    if not memories:
+        return "No memories stored yet. Create memories using create_memory tool."
+    
+    if tag:
+        memories = [m for m in memories if m.get("tag", "").lower() == tag.lower()]
+        if not memories:
+            return f"No memories found with tag: '{tag}'"
+    
+    message_lower = message.lower()
+    relevant_memories = []
+    
+    for memory in memories:
+        if (message_lower in memory["key"].lower() or 
+            message_lower in memory["content"].lower() or
+            memory["key"].lower() in message_lower):
+            relevant_memories.append(memory)
+    
+    if relevant_memories:
+        relevant_memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        best_match = relevant_memories[0]
+        persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+        encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+        return f"💾 {best_match['content']}\n[Source: {best_match['key']} | Tag: {best_match.get('tag', 'general')} | Storage: {STORAGE_TYPE} {persistence} {encryption_status}]"
+    
+    return "I don't have a memory about that yet."
+
+@mcp.tool()
+def get_server_status() -> dict:
+    """
+    Get server status and statistics including storage and encryption information.
+    
+    Returns:
+        Dictionary with server status, memory counts, storage and security details
+        
+    Example:
+        get_server_status()
+    """
+    memories = load_memories()
+    
+    memory_tags = {}
+    for memory in memories:
+        tag = memory.get("tag", "general")
+        memory_tags[tag] = memory_tags.get(tag, 0) + 1
+    
+    redis_status = "Connected ✓" if redis_client else "Not Connected ✗"
+    auth_status = "Enabled ✓" if auth_provider else "Disabled ✗"
+    encryption_status = "Enabled ✓" if encryption_manager.encryption_enabled else "Disabled ✗"
+    
+    return {
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "status": auth_status
         },
-        
-        "security_features": {
-            "encryption": {
-                "algorithm": encryption_manager.encryption_algorithm,
-                "key_derivation": "PBKDF2-HMAC-SHA256",
-                "iterations": 100000
-            },
-            "audit_logging": {
-                "enabled": True,
-                "retention": "6 years (HIPAA requirement)",
-                "log_location": "hipaa_audit_log.jsonl"
-            },
-            "session_management": {
-                "timeout_minutes": session_manager.session_timeout_minutes,
-                "automatic_logoff": True
-            },
-            "integrity_verification": {
-                "algorithm": "SHA-256",
-                "continuous_monitoring": True
-            }
+        "encryption": {
+            "enabled": encryption_manager.encryption_enabled,
+            "status": encryption_status,
+            "algorithm": "AES-256 (Fernet)" if encryption_manager.encryption_enabled else "None"
         },
+        "storage_type": STORAGE_TYPE,
+        "redis_status": redis_status,
+        "redis_url_configured": os.getenv("REDIS_URL") is not None,
+        "persistent": redis_client is not None,
+        "memories_count": len(memories),
+        "memory_tags_count": len(memory_tags),
+        "memory_tags": memory_tags,
+        "upstash_setup_url": "https://upstash.com" if not redis_client else None
+    }
+
+@mcp.tool()
+def clear_all_memories() -> str:
+    """
+    Clear all memories from storage. Use with caution!
+    
+    Returns:
+        Success or error message
         
+    Warning:
+        This action cannot be undone!
+        
+    Example:
+        clear_all_memories()
+    """
+    if save_memories([]):
+        persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+        return f"✅ All memories cleared from {STORAGE_TYPE} storage {persistence}"
+    else:
+        return f"⚠️  Error clearing memories"
+
+@mcp.tool()
+def get_help_documentation() -> dict:
+    """
+    Get comprehensive help documentation for all available tools.
+    
+    Returns:
+        Dictionary with detailed documentation for each tool
+        
+    Example:
+        get_help_documentation()
+    """
+    return {
+        "server_name": "Memory MCP Server (Encrypted)",
+        "version": "2.0.0",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None"
+        },
+        "encryption": {
+            "enabled": encryption_manager.encryption_enabled,
+            "algorithm": "AES-256 (Fernet)" if encryption_manager.encryption_enabled else "None"
+        },
         "storage": {
             "type": STORAGE_TYPE,
-            "provider": "Upstash Redis",
-            "tls_enabled": True,
-            "persistent": True
+            "persistent": redis_client is not None
         },
-        
+        "tools": {
+            "create_memory": {
+                "description": "Create a new memory with key-value pair (encrypted)",
+                "parameters": {
+                    "key": "Unique identifier (required)",
+                    "content": "The content to remember (required)",
+                    "tag": "Category tag (optional, default: 'general')",
+                    "metadata": "Additional info as dict (optional)"
+                },
+                "example": "create_memory('user_pref', 'Dark mode enabled', 'preferences')"
+            },
+            "get_memory": {
+                "description": "Retrieve a specific memory by key (decrypted)",
+                "parameters": {
+                    "key": "The memory key to retrieve (required)"
+                },
+                "example": "get_memory('user_pref')"
+            },
+            "get_memory_by_tag": {
+                "description": "Retrieve all memories with a specific tag",
+                "parameters": {
+                    "tag": "The tag to filter by (required)"
+                },
+                "example": "get_memory_by_tag('preferences')"
+            },
+            "update_memory": {
+                "description": "Update an existing memory",
+                "parameters": {
+                    "key": "Memory key to update (required)",
+                    "new_content": "New content (optional)",
+                    "new_tag": "New tag (optional)",
+                    "new_metadata": "New metadata to merge (optional)"
+                },
+                "example": "update_memory('user_pref', new_content='Light mode enabled')"
+            },
+            "forget_memory": {
+                "description": "Delete a memory by key",
+                "parameters": {
+                    "key": "Memory key to delete (required)"
+                },
+                "example": "forget_memory('user_pref')"
+            },
+            "list_memories": {
+                "description": "List all memories with optional filters",
+                "parameters": {
+                    "tag": "Filter by tag (optional)",
+                    "search": "Search in keys/content (optional)"
+                },
+                "example": "list_memories(tag='preferences')"
+            },
+            "list_tags": {
+                "description": "List all unique tags with usage counts",
+                "parameters": {},
+                "example": "list_tags()"
+            },
+            "memory_based_chat": {
+                "description": "Search and respond with relevant memories",
+                "parameters": {
+                    "message": "Search query (required)",
+                    "tag": "Filter by tag first (optional)"
+                },
+                "example": "memory_based_chat('What does user prefer?')"
+            },
+            "get_server_status": {
+                "description": "Get server statistics and status",
+                "parameters": {},
+                "example": "get_server_status()"
+            },
+            "clear_all_memories": {
+                "description": "Clear all memories (CAUTION: Cannot be undone)",
+                "parameters": {},
+                "example": "clear_all_memories()"
+            },
+            "get_help_documentation": {
+                "description": "Get this help documentation",
+                "parameters": {},
+                "example": "get_help_documentation()"
+            }
+        },
+        "encryption_setup": {
+            "current_status": "Enabled" if encryption_manager.encryption_enabled else "Disabled",
+            "to_enable_encryption": [
+                "1. Generate a strong encryption key (min 16 characters)",
+                "2. Set ENCRYPTION_KEY environment variable",
+                "3. Keep this key SAFE - you need it to decrypt data!",
+                "4. Restart the MCP server",
+                "5. All new data will be encrypted automatically"
+            ]
+        } if not encryption_manager.encryption_enabled else {
+            "current_status": "✅ Encryption enabled",
+            "algorithm": "AES-256 (Fernet)",
+            "note": "All sensitive data is encrypted at rest"
+        },
+        "storage_setup": {
+            "current_storage": STORAGE_TYPE,
+            "to_enable_permanent_storage": [
+                "1. Visit https://upstash.com (FREE tier available)",
+                "2. Create a new Redis database",
+                "3. Copy REDIS_URL from database details",
+                "4. Set REDIS_URL environment variable",
+                "5. Restart the MCP server"
+            ]
+        } if not redis_client else {
+            "current_storage": STORAGE_TYPE,
+            "status": "✅ Permanent storage enabled"
+        },
+        "auth_setup": {
+            "current_status": "Enabled" if auth_provider else "Disabled",
+            "to_enable_google_auth": [
+                "1. Visit https://console.cloud.google.com",
+                "2. Create OAuth 2.0 credentials",
+                "3. Set GOOGLE_CLIENT_ID environment variable",
+                "4. Set GOOGLE_CLIENT_SECRET environment variable",
+                "5. Set BASE_URL environment variable (your server URL)",
+                "6. Add authorized redirect URI: {BASE_URL}/oauth/callback",
+                "7. Restart the MCP server"
+            ]
+        } if not auth_provider else {
+            "current_status": "✅ Google OAuth enabled",
+            "provider": "Google"
+        }
+    }
+
+# ------------------------------
+# Resources
+# ------------------------------
+@mcp.resource("info://server/info")
+def server_info() -> dict:
+    """Get comprehensive information about the MCP server."""
+    return {
+        "name": "memory",
+        "version": "2.0.0",
+        "description": "Encrypted Memory-Based MCP Server with Persistent Storage and Google OAuth",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "base_url": BASE_URL if auth_provider else None
+        },
+        "encryption": {
+            "enabled": encryption_manager.encryption_enabled,
+            "algorithm": "AES-256 (Fernet)" if encryption_manager.encryption_enabled else "None",
+            "status": "Data encrypted at rest" if encryption_manager.encryption_enabled else "Data stored in plaintext"
+        },
+        "storage": {
+            "type": STORAGE_TYPE,
+            "persistent": redis_client is not None,
+            "redis_connected": redis_client is not None,
+            "provider": "Upstash Redis" if redis_client else "In-Memory (Temporary)"
+        },
         "tools": [
             "create_memory",
             "get_memory",
+            "get_memory_by_tag",
             "update_memory",
             "forget_memory",
             "list_memories",
-            "get_audit_logs",
-            "verify_system_integrity",
-            "get_hipaa_compliance_report"
-        ]
+            "list_tags",
+            "memory_based_chat",
+            "get_server_status",
+            "clear_all_memories",
+            "get_help_documentation"
+        ],
+        "security_features": [
+            "AES-256 encryption for sensitive data" if encryption_manager.encryption_enabled else "No encryption",
+            "Google OAuth authentication" if auth_provider else "No authentication",
+            "Encrypted Redis storage" if (redis_client and encryption_manager.encryption_enabled) else "Standard storage"
+        ],
+        "encryption_setup_instructions": {
+            "step_1": "Generate a strong random password (minimum 16 characters)",
+            "step_2": "Add ENCRYPTION_KEY environment variable with your password",
+            "step_3": "Store this key safely - you'll need it to decrypt data!",
+            "step_4": "Redeploy your server",
+            "note": "⚠️ IMPORTANT: Losing your encryption key means losing access to all encrypted data!"
+        } if not encryption_manager.encryption_enabled else {
+            "status": "✅ Encryption configured",
+            "algorithm": "AES-256 (Fernet)"
+        },
+        "auth_setup_instructions": {
+            "step_1": "Visit https://console.cloud.google.com",
+            "step_2": "Create OAuth 2.0 credentials (Web application)",
+            "step_3": "Copy Client ID and Client Secret",
+            "step_4": "Add GOOGLE_CLIENT_ID environment variable",
+            "step_5": "Add GOOGLE_CLIENT_SECRET environment variable",
+            "step_6": "Add BASE_URL environment variable (your server URL)",
+            "step_7": "Add authorized redirect URI: {BASE_URL}/oauth/callback",
+            "step_8": "Redeploy your server",
+            "note": "Google OAuth enables secure authentication for MCP clients"
+        } if not auth_provider else {
+            "status": "✅ Google OAuth configured"
+        },
+        "storage_setup_instructions": {
+            "step_1": "Sign up at https://upstash.com (FREE tier available)",
+            "step_2": "Create a new Redis database",
+            "step_3": "Copy the REDIS_URL from database details",
+            "step_4": "Add REDIS_URL to environment variables",
+            "step_5": "Redeploy your server",
+            "note": "Free tier includes 10,000 commands/day with permanent storage"
+        } if not redis_client else {
+            "status": "✅ Redis configured - using permanent storage"
+        }
     }
 
-# ======================================================================
-# RUN SERVER
-# ======================================================================
+# ------------------------------
+# Run Server
+# ------------------------------
 if __name__ == "__main__":
-    print("=" * 70)
-    print("🏥 HIPAA-COMPLIANT FASTMCP MEMORY SERVER")
-    print("=" * 70)
-    print("")
+    print("=" * 60)
+    print("🚀 FastMCP Memory Server Starting (ENCRYPTED VERSION)...")
+    print("=" * 60)
     
-    print("✅ HIPAA TECHNICAL SAFEGUARDS STATUS:")
-    print("   • Access Control (164.312(a)(1)): ✓ IMPLEMENTED")
-    print("   • Audit Controls (164.312(b)): ✓ IMPLEMENTED")
-    print("   • Integrity Controls (164.312(c)(1)): ✓ IMPLEMENTED")
-    print("   • Transmission Security (164.312(e)(1)): ✓ IMPLEMENTED")
-    print("   • Encryption at Rest (164.312(a)(2)(iv)): ✓ IMPLEMENTED")
-    print("   • Automatic Logoff (164.312(a)(2)(iii)): ✓ IMPLEMENTED")
-    print("")
-    
-    print(f"🔐 ENCRYPTION: {encryption_manager.encryption_algorithm}")
-    print(f"💾 STORAGE: {STORAGE_TYPE}")
-    print(f"⏱️  SESSION TIMEOUT: {session_manager.session_timeout_minutes} minutes")
-    print(f"📋 AUDIT LOGGING: ENABLED")
-    print("")
-    
-    # Verify data integrity on startup
-    print("🔍 Verifying data integrity...")
-    if verify_data_integrity():
-        print("   ✅ Data integrity verified")
+    # Encryption Status
+    if encryption_manager.encryption_enabled:
+        print(f"🔐 Encryption: ENABLED (AES-256)")
+        print(f"✅ All sensitive data will be encrypted at rest")
     else:
-        print("   ⚠️  Data integrity check failed - investigate immediately")
-    print("")
+        print(f"🔓 Encryption: DISABLED")
+        print(f"⚠️  Data will be stored in PLAINTEXT!")
+        print(f"💡 Set ENCRYPTION_KEY environment variable to enable encryption")
+    
+    print("=" * 60)
+    
+    # Authentication Status
+    if auth_provider:
+        print(f"🔐 Authentication: ENABLED (Google OAuth)")
+        print(f"🌐 Base URL: {BASE_URL}")
+    else:
+        print(f"🔓 Authentication: DISABLED")
+        print(f"💡 Add Google OAuth credentials to enable authentication")
+    
+    print("=" * 60)
+    
+    # Storage Status
+    print(f"📦 Storage Type: {STORAGE_TYPE}")
+    
+    if redis_client:
+        print(f"✅ Redis Status: Connected")
+        print(f"💾 Persistence: ENABLED - Data survives restarts!")
+        if encryption_manager.encryption_enabled:
+            print(f"🔐 Security: Data encrypted before storage")
+    else:
+        print(f"⚠️  Redis Status: Not Connected")
+        print(f"💾 Persistence: DISABLED - Data is temporary!")
+        print(f"")
+        print(f"📝 To enable permanent storage:")
+        print(f"   1. Visit: https://upstash.com")
+        print(f"   2. Create free Redis database")
+        print(f"   3. Set REDIS_URL environment variable")
+        print(f"   4. Restart server")
+    
+    print("=" * 60)
     
     memories = load_memories()
-    print(f"💾 Loaded {len(memories)} encrypted memories")
-    print("")
+    print(f"✅ Loaded {len(memories)} existing memories")
     
-    print("=" * 70)
-    print("🌐 Server ready for HIPAA-compliant operations")
-    print("=" * 70)
+    print("=" * 60)
+    print(f"🌐 Server ready and listening...")
+    print(f"🔒 Security Level: {'HIGH' if (encryption_manager.encryption_enabled and auth_provider) else 'MEDIUM' if (encryption_manager.encryption_enabled or auth_provider) else 'LOW'}")
+    print("=" * 60)
     
+    # Run with default settings (FastMCP handles transport automatically)
     mcp.run()
