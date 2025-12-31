@@ -140,7 +140,7 @@ else:
 # IMPORTANT: Set auth_required=False to allow tools to be discovered
 mcp = FastMCP(
     name="memory",
-    auth=auth_provider,
+    auth=None,
    
 )
 
@@ -753,4 +753,4 @@ if __name__ == "__main__":
     print(f"🌐 Server ready and listening...")
     print("=" * 60)
     
-    mcp.run(transport="sse")
+    mcp.run()
