@@ -151,7 +151,7 @@ else:
 mcp = FastMCP(
     name="memory",
     
-    auth=auth_provider  # Will be None if credentials not configured
+    auth=None  # Will be None if credentials not configured
 )
 
 # ------------------------------
