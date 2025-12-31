@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
+from contextvars import ContextVar
 
 # ------------------------------
 # HIPAA Compliance Configuration
@@ -194,6 +195,35 @@ mcp = FastMCP(
     auth=auth_provider,  # REQUIRED for HIPAA
 )
 
+# Middleware to extract and set user context from authenticated requests
+# Note: This may not be supported by all FastMCP versions
+try:
+    if hasattr(mcp, 'middleware'):
+        @mcp.middleware()
+        async def set_user_context(request, call_next):
+            """Extract user context from authenticated request and set it in context variable"""
+            try:
+                # FastMCP should provide user info in request after authentication
+                # Try to get user from request attributes
+                user_id = getattr(request, 'user_id', None) or getattr(request, 'user', {}).get('id') or getattr(request, 'user', {}).get('sub')
+                email = getattr(request, 'email', None) or getattr(request, 'user', {}).get('email')
+                
+                if user_id:
+                    user_ctx = UserContext(
+                        user_id=str(user_id),
+                        email=str(email) if email else f"user_{user_id}",
+                        authenticated=True
+                    )
+                    _current_user.set(user_ctx)
+            except Exception as e:
+                print(f"⚠️ Warning: Could not extract user context: {e}")
+            
+            response = await call_next(request)
+            return response
+except Exception as e:
+    print(f"⚠️ Note: Middleware not available in this FastMCP version: {e}")
+    print("   User context will be extracted from request in tool functions")
+
 # ------------------------------
 # Redis Storage (REQUIRED for HIPAA)
 # ------------------------------
@@ -229,17 +259,53 @@ audit_logger = AuditLogger(redis_client)
 # ------------------------------
 # User-Isolated Storage Functions
 # ------------------------------
-def get_user_context(context: Any) -> UserContext:
+# Context variable to store current request user
+_current_user: ContextVar[Optional[UserContext]] = ContextVar('current_user', default=None)
+
+def get_user_context(context: Any = None) -> UserContext:
     """Extract user context from MCP request context"""
-    # This would come from the authenticated session
-    # For now, we'll create a mock implementation
-    user_id = getattr(context, 'user_id', None)
-    email = getattr(context, 'email', None)
+    # Try to get from context variable first (set by middleware if available)
+    user_ctx = _current_user.get()
+    if user_ctx:
+        return user_ctx
     
-    if not user_id:
-        raise ValueError("🚨 Unauthenticated access denied")
+    # Fallback: try to extract from context parameter
+    if context:
+        user_id = getattr(context, 'user_id', None) or getattr(context, 'sub', None)
+        email = getattr(context, 'email', None)
+        if user_id:
+            return UserContext(
+                user_id=str(user_id),
+                email=str(email) if email else f"user_{user_id}",
+                authenticated=True
+            )
     
-    return UserContext(user_id=user_id, email=email)
+    # Try to get from FastMCP's request context if available
+    try:
+        import inspect
+        frame = inspect.currentframe()
+        # Look for request in calling frames
+        for i in range(5):  # Check up to 5 frames up
+            frame = frame.f_back if frame else None
+            if not frame:
+                break
+            local_vars = frame.f_locals
+            # Check for common request variable names
+            for var_name in ['request', 'req', 'ctx', 'context']:
+                if var_name in local_vars:
+                    req = local_vars[var_name]
+                    user_id = getattr(req, 'user_id', None) or getattr(req, 'user', {}).get('id') if hasattr(req, 'user') else None
+                    email = getattr(req, 'email', None) or getattr(req, 'user', {}).get('email') if hasattr(req, 'user') else None
+                    if user_id:
+                        return UserContext(
+                            user_id=str(user_id),
+                            email=str(email) if email else f"user_{user_id}",
+                            authenticated=True
+                        )
+    except Exception:
+        pass
+    
+    raise ValueError("🚨 Unauthenticated access denied - no user context available")
 
 def load_user_memories(user_context: UserContext) -> list:
     """Load memories for SPECIFIC user only"""
@@ -346,8 +412,7 @@ def create_patient_record(
     patient_id: str,
     content: str,
     record_type: str,
-    metadata: Optional[dict] = None,
-    context: Any = None
+    metadata: Optional[dict] = None
 ) -> str:
     """
     Create a new patient record (PHI - Protected Health Information).
@@ -358,12 +423,11 @@ def create_patient_record(
         content: Medical information (encrypted at rest)
         record_type: Type of record (medical_history, social_history, sexual_history, family_history)
         metadata: Additional structured data
-        context: Authentication context (auto-provided)
         
     Returns:
         Success message with audit trail
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     
     # Validate record type
     valid_types = ["medical_history", "social_history", "sexual_history", "family_history", "general"]
@@ -423,18 +487,17 @@ def create_patient_record(
         return "⚠️ Record creation failed"
 
 @mcp.tool()
-def get_patient_record(patient_id: str, context: Any = None) -> dict:
+def get_patient_record(patient_id: str) -> dict:
     """
     Retrieve a patient record. Users can ONLY access their own records.
     
     Args:
         patient_id: The patient record identifier
-        context: Authentication context (auto-provided)
         
     Returns:
         Patient record data or error
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     for memory in memories:
@@ -473,18 +536,17 @@ def get_patient_record(patient_id: str, context: Any = None) -> dict:
     }
 
 @mcp.tool()
-def get_records_by_type(record_type: str, context: Any = None) -> dict:
+def get_records_by_type(record_type: str) -> dict:
     """
     Get all patient records of a specific type for the authenticated user.
     
     Args:
         record_type: Type of records to retrieve
-        context: Authentication context (auto-provided)
         
     Returns:
         List of matching records
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     matching = [m for m in memories if m.get("tag", "general").lower() == record_type.lower()]
@@ -511,8 +573,7 @@ def update_patient_record(
     patient_id: str,
     new_content: Optional[str] = None,
     new_record_type: Optional[str] = None,
-    new_metadata: Optional[dict] = None,
-    context: Any = None
+    new_metadata: Optional[dict] = None
 ) -> str:
     """
     Update a patient record. Users can ONLY update their own records.
@@ -522,12 +583,11 @@ def update_patient_record(
         new_content: Updated medical information
         new_record_type: Updated record type
         new_metadata: Updated metadata
-        context: Authentication context (auto-provided)
         
     Returns:
         Success message with audit trail
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     for memory in memories:
@@ -580,19 +640,18 @@ def update_patient_record(
     return f"❌ No patient record found: '{patient_id}'"
 
 @mcp.tool()
-def delete_patient_record(patient_id: str, context: Any = None) -> str:
+def delete_patient_record(patient_id: str) -> str:
     """
     Delete a patient record. Users can ONLY delete their own records.
     This is logged for HIPAA compliance.
     
     Args:
         patient_id: Patient record to delete
-        context: Authentication context (auto-provided)
         
     Returns:
         Success message with audit trail
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     original_count = len(memories)
     
@@ -629,8 +688,7 @@ def delete_patient_record(patient_id: str, context: Any = None) -> str:
 @mcp.tool()
 def list_my_patient_records(
     record_type: Optional[str] = None,
-    search: Optional[str] = None,
-    context: Any = None
+    search: Optional[str] = None
 ) -> dict:
     """
     List all patient records for the authenticated user.
@@ -639,12 +697,11 @@ def list_my_patient_records(
     Args:
         record_type: Filter by record type
         search: Search term
-        context: Authentication context (auto-provided)
         
     Returns:
         List of patient records
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     if record_type:
@@ -676,19 +733,18 @@ def list_my_patient_records(
     }
 
 @mcp.tool()
-def get_my_audit_trail(days: int = 30, context: Any = None) -> dict:
+def get_my_audit_trail(days: int = 30) -> dict:
     """
     View audit trail of all access to your patient records.
     HIPAA requires maintaining audit logs of all PHI access.
     
     Args:
         days: Number of days of logs to retrieve
-        context: Authentication context (auto-provided)
         
     Returns:
         Audit log entries
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     
     all_logs = audit_logger.get_audit_logs(user_ctx.user_id, days)
     user_logs = [log for log in all_logs if log["user_id"] == user_ctx.user_id]
@@ -704,17 +760,14 @@ def get_my_audit_trail(days: int = 30, context: Any = None) -> dict:
     }
 
 @mcp.tool()
-def get_hipaa_compliance_status(context: Any = None) -> dict:
+def get_hipaa_compliance_status() -> dict:
     """
     Get HIPAA compliance status and security configuration.
     
-    Args:
-        context: Authentication context (auto-provided)
-        
     Returns:
         Compliance status report
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     return {
@@ -755,18 +808,15 @@ def get_hipaa_compliance_status(context: Any = None) -> dict:
     }
 
 @mcp.tool()
-def export_my_data(context: Any = None) -> dict:
+def export_my_data() -> dict:
     """
     Export all patient records for the authenticated user.
     Required for HIPAA Right of Access.
     
-    Args:
-        context: Authentication context (auto-provided)
-        
     Returns:
         Complete data export
     """
-    user_ctx = get_user_context(context)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     audit_logger.log_access(
