@@ -8,11 +8,6 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
-import logging
-
-# Setup logging for debugging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # ------------------------------
 # Encryption Configuration
@@ -40,12 +35,18 @@ class EncryptionManager:
                 key = base64.urlsafe_b64encode(kdf.derive(encryption_key.encode()))
                 self.cipher = Fernet(key)
                 self.encryption_enabled = True
-                logger.info("🔐 Encryption: ENABLED")
+                print("🔐 Encryption: ENABLED (User-provided key)")
+                print("✅ Data will be encrypted at rest")
             except Exception as e:
-                logger.warning(f"⚠️  Encryption initialization failed: {e}")
-                self.encryption_enabled = False
+                print(f"⚠️  Encryption initialization failed: {e}")
+                print("💡 Data will be stored WITHOUT encryption")
         else:
-            logger.info("🔓 Encryption: DISABLED")
+            print("🔓 Encryption: DISABLED")
+            print("💡 To enable encryption:")
+            print("   1. Set ENCRYPTION_KEY environment variable")
+            print("   2. Use a strong, random password (min 16 characters)")
+            print("   3. Keep this key safe - you'll need it to decrypt data!")
+            print("   4. Restart the server")
     
     def encrypt(self, data: str) -> str:
         """Encrypt string data"""
@@ -56,7 +57,7 @@ class EncryptionManager:
             encrypted = self.cipher.encrypt(data.encode())
             return base64.b64encode(encrypted).decode()
         except Exception as e:
-            logger.error(f"❌ Encryption error: {e}")
+            print(f"❌ Encryption error: {e}")
             return data
     
     def decrypt(self, encrypted_data: str) -> str:
@@ -69,7 +70,7 @@ class EncryptionManager:
             decrypted = self.cipher.decrypt(decoded)
             return decrypted.decode()
         except Exception as e:
-            logger.error(f"❌ Decryption error: {e}")
+            print(f"❌ Decryption error: {e}")
             return encrypted_data
     
     def encrypt_memory(self, memory: dict) -> dict:
@@ -114,27 +115,42 @@ encryption_manager = EncryptionManager()
 # ------------------------------
 # Authentication Configuration
 # ------------------------------
+auth_provider = None
+
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL", "").rstrip('/')
+BASE_URL = os.getenv("BASE_URL")
 
-auth_provider = None
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
     try:
+        # CRITICAL FIX: Add trailing slash if not present
+        base_url_normalized = BASE_URL.rstrip('/')
+        
         auth_provider = GoogleProvider(
             client_id=GOOGLE_CLIENT_ID,
             client_secret=GOOGLE_CLIENT_SECRET,
-            base_url=BASE_URL
+            base_url=base_url_normalized
         )
-        logger.info(f"✅ Google OAuth enabled: {BASE_URL}")
+        print("✅ Google OAuth authentication enabled")
+        print(f"🔐 Auth URL: {base_url_normalized}")
+        print(f"📝 Redirect URI: {base_url_normalized}/oauth/callback")
     except Exception as e:
-        logger.warning(f"⚠️  Google OAuth failed: {e}")
+        print(f"⚠️  Failed to initialize Google OAuth: {e}")
+        print("💡 Server will run without authentication")
+        auth_provider = None
+else:
+    print("ℹ️  Google OAuth not configured")
+    print("💡 To enable Google authentication:")
+    print("   1. Create OAuth 2.0 credentials at https://console.cloud.google.com")
+    print("   2. Set GOOGLE_CLIENT_ID environment variable")
+    print("   3. Set GOOGLE_CLIENT_SECRET environment variable")
+    print("   4. Set BASE_URL environment variable (your server URL)")
+    print("   5. Add authorized redirect URI: {BASE_URL}/oauth/callback")
 
-# Initialize FastMCP with proper configuration
+# Initialize FastMCP
 mcp = FastMCP(
     name="memory",
-    auth=auth_provider,
-    dependencies=[]  # Explicitly set empty dependencies
+    auth=auth_provider
 )
 
 # ------------------------------
@@ -156,10 +172,20 @@ try:
             health_check_interval=30
         )
         redis_client.ping()
-        STORAGE_TYPE = "Redis (Permanent)"
-        logger.info("✅ Connected to Redis")
+        STORAGE_TYPE = "Redis (Upstash - Permanent + Encrypted)" if encryption_manager.encryption_enabled else "Redis (Upstash - Permanent)"
+        print("✅ Connected to Upstash Redis")
+        print("💾 Storage: PERMANENT - Data will persist across restarts!")
+    else:
+        print("⚠️  REDIS_URL not found in environment variables")
+        print("📝 Using temporary in-memory storage")
+        
+except ImportError:
+    print("⚠️  Redis package not installed")
+    print("📝 Using temporary in-memory storage")
+    
 except Exception as e:
-    logger.warning(f"⚠️  Redis connection failed: {e}")
+    print(f"⚠️  Redis connection failed: {e}")
+    print("💡 Using temporary in-memory storage")
 
 # Fallback in-memory storage
 memory_store = []
@@ -179,10 +205,14 @@ def load_memories():
                 decrypted_memories = [
                     encryption_manager.decrypt_memory(m) for m in memories
                 ]
+                print(f"📥 Loaded {len(decrypted_memories)} memories from Redis")
+                if encryption_manager.encryption_enabled:
+                    print("🔓 Memories decrypted successfully")
                 return decrypted_memories
+            print("📝 No existing memories found in Redis")
             return []
         except Exception as e:
-            logger.error(f"⚠️  Error loading from Redis: {e}")
+            print(f"⚠️  Error loading from Redis: {e}")
             return memory_store
     else:
         return memory_store
@@ -197,44 +227,71 @@ def save_memories(memories):
                 encryption_manager.encrypt_memory(m) for m in memories
             ]
             redis_client.set("mcp:memories", json.dumps(encrypted_memories))
+            encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+            print(f"💾 Saved {len(memories)} memories to Redis {encryption_status}")
             return True
         except Exception as e:
-            logger.error(f"❌ Error saving to Redis: {e}")
+            print(f"❌ Error saving to Redis: {e}")
             memory_store = memories
             return False
     else:
         memory_store = memories
+        print(f"💾 Saved {len(memories)} memories to memory (TEMPORARY)")
         return True
 
 # ------------------------------
 # Memory Management Tools
 # ------------------------------
 @mcp.tool()
-def create_memory(key: str, content: str, tag: str = "general", metadata: dict = None) -> str:
-    """Create a new memory with key-value pair"""
+def create_memory(key: str, content: str, tag: Optional[str] = None, metadata: Optional[dict] = None) -> str:
+    """
+    Create a new memory with key-value pair.
+    
+    Args:
+        key: Unique identifier for the memory
+        content: The actual content to remember
+        tag: Optional tag for categorization (default: "general")
+        metadata: Optional additional information as a dictionary
+        
+    Returns:
+        Success or error message with storage information
+    """
     memories = load_memories()
     
     for memory in memories:
         if memory["key"].lower() == key.lower():
-            return f"❌ Memory '{key}' already exists. Use update_memory to modify it."
+            return f"❌ Memory with key '{key}' already exists. Use update_memory to modify it."
     
     new_memory = {
         "key": key,
         "content": content,
-        "tag": tag,
+        "tag": tag if tag else "general",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
-        "metadata": metadata or {}
+        "metadata": metadata if metadata else {}
     }
     
     memories.append(new_memory)
-    save_memories(memories)
     
-    return f"✅ Memory created: '{key}' [Tag: {tag}]\n💾 Content: {content}"
+    if save_memories(memories):
+        tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
+        persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+        encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+        return f"✅ Memory created: '{key}'{tag_info}\n💾 Content: {content}\n📦 Storage: {STORAGE_TYPE} {persistence} {encryption_status}"
+    else:
+        return f"⚠️  Memory created but storage may be temporary"
 
 @mcp.tool()
 def get_memory(key: str) -> dict:
-    """Retrieve a specific memory by key"""
+    """
+    Retrieve a specific memory by key.
+    
+    Args:
+        key: The unique identifier of the memory to retrieve
+        
+    Returns:
+        Dictionary with memory details or error message
+    """
     memories = load_memories()
     
     for memory in memories:
@@ -242,7 +299,9 @@ def get_memory(key: str) -> dict:
             return {
                 "found": True,
                 "memory": memory,
-                "storage": STORAGE_TYPE
+                "storage": STORAGE_TYPE,
+                "persistent": redis_client is not None,
+                "encrypted": encryption_manager.encryption_enabled
             }
     
     return {
@@ -252,20 +311,50 @@ def get_memory(key: str) -> dict:
 
 @mcp.tool()
 def get_memory_by_tag(tag: str) -> dict:
-    """Retrieve all memories with a specific tag"""
+    """
+    Retrieve all memories with a specific tag.
+    
+    Args:
+        tag: The tag to filter memories by
+        
+    Returns:
+        Dictionary with matching memories or error message
+    """
     memories = load_memories()
+    
     matching_memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
     
+    if matching_memories:
+        return {
+            "found": True,
+            "tag": tag,
+            "count": len(matching_memories),
+            "memories": matching_memories,
+            "storage": STORAGE_TYPE,
+            "persistent": redis_client is not None,
+            "encrypted": encryption_manager.encryption_enabled
+        }
+    
     return {
-        "found": len(matching_memories) > 0,
+        "found": False,
         "tag": tag,
-        "count": len(matching_memories),
-        "memories": matching_memories
+        "message": f"No memories found with tag: '{tag}'"
     }
 
 @mcp.tool()
-def update_memory(key: str, new_content: str = None, new_tag: str = None, new_metadata: dict = None) -> str:
-    """Update an existing memory's content, tag, or metadata"""
+def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional[str] = None, new_metadata: Optional[dict] = None) -> str:
+    """
+    Update an existing memory's content, tag, or metadata.
+    
+    Args:
+        key: The unique identifier of the memory to update
+        new_content: New content for the memory (optional)
+        new_tag: New tag for the memory (optional)
+        new_metadata: New metadata to merge with existing (optional)
+        
+    Returns:
+        Success message with update details or error message
+    """
     memories = load_memories()
     
     for memory in memories:
@@ -286,31 +375,55 @@ def update_memory(key: str, new_content: str = None, new_tag: str = None, new_me
                 updates.append("Metadata updated")
             
             if not updates:
-                return f"⚠️  No changes specified for '{key}'"
+                return f"⚠️  No changes specified for memory: '{key}'"
             
             memory["updated_at"] = datetime.now().isoformat()
-            save_memories(memories)
             
-            return f"✅ Memory updated: '{key}'\n" + "\n".join(updates)
+            if save_memories(memories):
+                persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+                encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+                return f"✅ Memory updated: '{key}'\n" + "\n".join(updates) + f"\n📦 Storage: {STORAGE_TYPE} {persistence} {encryption_status}"
+            else:
+                return f"⚠️  Memory updated but storage may be temporary"
     
     return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool()
 def forget_memory(key: str) -> str:
-    """Delete a specific memory by key"""
+    """
+    Delete a specific memory by key.
+    
+    Args:
+        key: The unique identifier of the memory to delete
+        
+    Returns:
+        Success or error message
+    """
     memories = load_memories()
     original_count = len(memories)
     memories = [m for m in memories if m["key"].lower() != key.lower()]
     
     if len(memories) < original_count:
-        save_memories(memories)
-        return f"✅ Memory forgotten: '{key}'"
+        if save_memories(memories):
+            persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+            return f"✅ Memory forgotten: '{key}'\n📦 Storage: {STORAGE_TYPE} {persistence}"
+        else:
+            return f"⚠️  Memory deleted but changes may be temporary"
     
     return f"❌ No memory found with key: '{key}'"
 
 @mcp.tool()
-def list_memories(tag: str = None, search: str = None) -> dict:
-    """List all memories, optionally filtered by tag or search term"""
+def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> dict:
+    """
+    List all memories, optionally filtered by tag or search term.
+    
+    Args:
+        tag: Filter memories by tag (optional)
+        search: Search term to find in keys or content (optional)
+        
+    Returns:
+        Dictionary with total count and list of memories
+    """
     memories = load_memories()
     
     if tag:
@@ -326,12 +439,19 @@ def list_memories(tag: str = None, search: str = None) -> dict:
     return {
         "total_count": len(memories),
         "memories": memories,
-        "storage": STORAGE_TYPE
+        "storage": STORAGE_TYPE,
+        "persistent": redis_client is not None,
+        "encrypted": encryption_manager.encryption_enabled
     }
 
 @mcp.tool()
 def list_tags() -> dict:
-    """List all unique tags used in memories with their counts"""
+    """
+    List all unique tags used in memories with their counts.
+    
+    Returns:
+        Dictionary with all tags and their usage counts
+    """
     memories = load_memories()
     
     if not memories:
@@ -348,12 +468,24 @@ def list_tags() -> dict:
     
     return {
         "total_tags": len(tag_counts),
-        "tags": tag_counts
+        "tags": tag_counts,
+        "storage": STORAGE_TYPE,
+        "persistent": redis_client is not None,
+        "encrypted": encryption_manager.encryption_enabled
     }
 
 @mcp.tool()
-def memory_based_chat(message: str, tag: str = None) -> str:
-    """Respond based on stored memories by searching through content and keys"""
+def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
+    """
+    Respond based on stored memories by searching through content and keys.
+    
+    Args:
+        message: Search query to find relevant memories
+        tag: Optional tag to filter memories before searching
+        
+    Returns:
+        Best matching memory content or message if no match found
+    """
     memories = load_memories()
     
     if not memories:
@@ -376,13 +508,20 @@ def memory_based_chat(message: str, tag: str = None) -> str:
     if relevant_memories:
         relevant_memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
         best_match = relevant_memories[0]
-        return f"💾 {best_match['content']}\n[Source: {best_match['key']} | Tag: {best_match.get('tag', 'general')}]"
+        persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+        encryption_status = "🔐 ENCRYPTED" if encryption_manager.encryption_enabled else ""
+        return f"💾 {best_match['content']}\n[Source: {best_match['key']} | Tag: {best_match.get('tag', 'general')} | Storage: {STORAGE_TYPE} {persistence} {encryption_status}]"
     
     return "I don't have a memory about that yet."
 
 @mcp.tool()
 def get_server_status() -> dict:
-    """Get server status and statistics"""
+    """
+    Get server status and statistics including storage and encryption information.
+    
+    Returns:
+        Dictionary with server status, memory counts, storage and security details
+    """
     memories = load_memories()
     
     memory_tags = {}
@@ -390,50 +529,234 @@ def get_server_status() -> dict:
         tag = memory.get("tag", "general")
         memory_tags[tag] = memory_tags.get(tag, 0) + 1
     
+    redis_status = "Connected ✓" if redis_client else "Not Connected ✗"
+    auth_status = "Enabled ✓" if auth_provider else "Disabled ✗"
+    encryption_status = "Enabled ✓" if encryption_manager.encryption_enabled else "Disabled ✗"
+    
     return {
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "status": auth_status
+        },
+        "encryption": {
+            "enabled": encryption_manager.encryption_enabled,
+            "status": encryption_status,
+            "algorithm": "AES-256 (Fernet)" if encryption_manager.encryption_enabled else "None"
+        },
+        "storage_type": STORAGE_TYPE,
+        "redis_status": redis_status,
+        "redis_url_configured": os.getenv("REDIS_URL") is not None,
+        "persistent": redis_client is not None,
+        "memories_count": len(memories),
+        "memory_tags_count": len(memory_tags),
+        "memory_tags": memory_tags,
+        "upstash_setup_url": "https://upstash.com" if not redis_client else None
+    }
+
+@mcp.tool()
+def clear_all_memories() -> str:
+    """
+    Clear all memories from storage. Use with caution!
+    
+    Returns:
+        Success or error message
+        
+    Warning:
+        This action cannot be undone!
+    """
+    if save_memories([]):
+        persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
+        return f"✅ All memories cleared from {STORAGE_TYPE} storage {persistence}"
+    else:
+        return f"⚠️  Error clearing memories"
+
+@mcp.tool()
+def get_help_documentation() -> dict:
+    """
+    Get comprehensive help documentation for all available tools.
+    
+    Returns:
+        Dictionary with detailed documentation for each tool
+    """
+    return {
+        "server_name": "Memory MCP Server (Encrypted)",
+        "version": "2.0.0",
         "authentication": {
             "enabled": auth_provider is not None,
             "provider": "Google OAuth" if auth_provider else "None"
         },
         "encryption": {
             "enabled": encryption_manager.encryption_enabled,
-            "algorithm": "AES-256" if encryption_manager.encryption_enabled else "None"
+            "algorithm": "AES-256 (Fernet)" if encryption_manager.encryption_enabled else "None"
         },
-        "storage_type": STORAGE_TYPE,
-        "redis_connected": redis_client is not None,
-        "memories_count": len(memories),
-        "memory_tags": memory_tags
+        "storage": {
+            "type": STORAGE_TYPE,
+            "persistent": redis_client is not None
+        },
+        "tools": {
+            "create_memory": {
+                "description": "Create a new memory with key-value pair (encrypted)",
+                "parameters": {
+                    "key": "Unique identifier (required)",
+                    "content": "The content to remember (required)",
+                    "tag": "Category tag (optional, default: 'general')",
+                    "metadata": "Additional info as dict (optional)"
+                },
+                "example": "create_memory('user_pref', 'Dark mode enabled', 'preferences')"
+            },
+            "get_memory": {
+                "description": "Retrieve a specific memory by key (decrypted)",
+                "parameters": {
+                    "key": "The memory key to retrieve (required)"
+                },
+                "example": "get_memory('user_pref')"
+            },
+            "get_memory_by_tag": {
+                "description": "Retrieve all memories with a specific tag",
+                "parameters": {
+                    "tag": "The tag to filter by (required)"
+                },
+                "example": "get_memory_by_tag('preferences')"
+            },
+            "update_memory": {
+                "description": "Update an existing memory",
+                "parameters": {
+                    "key": "Memory key to update (required)",
+                    "new_content": "New content (optional)",
+                    "new_tag": "New tag (optional)",
+                    "new_metadata": "New metadata to merge (optional)"
+                },
+                "example": "update_memory('user_pref', new_content='Light mode enabled')"
+            },
+            "forget_memory": {
+                "description": "Delete a memory by key",
+                "parameters": {
+                    "key": "Memory key to delete (required)"
+                },
+                "example": "forget_memory('user_pref')"
+            },
+            "list_memories": {
+                "description": "List all memories with optional filters",
+                "parameters": {
+                    "tag": "Filter by tag (optional)",
+                    "search": "Search in keys/content (optional)"
+                },
+                "example": "list_memories(tag='preferences')"
+            },
+            "list_tags": {
+                "description": "List all unique tags with usage counts",
+                "parameters": {},
+                "example": "list_tags()"
+            },
+            "memory_based_chat": {
+                "description": "Search and respond with relevant memories",
+                "parameters": {
+                    "message": "Search query (required)",
+                    "tag": "Filter by tag first (optional)"
+                },
+                "example": "memory_based_chat('What does user prefer?')"
+            },
+            "get_server_status": {
+                "description": "Get server statistics and status",
+                "parameters": {},
+                "example": "get_server_status()"
+            },
+            "clear_all_memories": {
+                "description": "Clear all memories (CAUTION: Cannot be undone)",
+                "parameters": {},
+                "example": "clear_all_memories()"
+            },
+            "get_help_documentation": {
+                "description": "Get this help documentation",
+                "parameters": {},
+                "example": "get_help_documentation()"
+            }
+        }
     }
 
-@mcp.tool()
-def clear_all_memories() -> str:
-    """Clear all memories from storage. Use with caution!"""
-    save_memories([])
-    return f"✅ All memories cleared from {STORAGE_TYPE} storage"
+# ------------------------------
+# Resources
+# ------------------------------
+@mcp.resource("info://server/info")
+def server_info() -> dict:
+    """Get comprehensive information about the MCP server."""
+    return {
+        "name": "memory",
+        "version": "2.0.0",
+        "description": "Encrypted Memory-Based MCP Server with Persistent Storage and Google OAuth",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "base_url": BASE_URL if auth_provider else None
+        },
+        "encryption": {
+            "enabled": encryption_manager.encryption_enabled,
+            "algorithm": "AES-256 (Fernet)" if encryption_manager.encryption_enabled else "None",
+            "status": "Data encrypted at rest" if encryption_manager.encryption_enabled else "Data stored in plaintext"
+        },
+        "storage": {
+            "type": STORAGE_TYPE,
+            "persistent": redis_client is not None,
+            "redis_connected": redis_client is not None,
+            "provider": "Upstash Redis" if redis_client else "In-Memory (Temporary)"
+        },
+        "tools": [
+            "create_memory",
+            "get_memory",
+            "get_memory_by_tag",
+            "update_memory",
+            "forget_memory",
+            "list_memories",
+            "list_tags",
+            "memory_based_chat",
+            "get_server_status",
+            "clear_all_memories",
+            "get_help_documentation"
+        ]
+    }
 
 # ------------------------------
 # Run Server
 # ------------------------------
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 FastMCP Memory Server Starting...")
+    print("🚀 FastMCP Memory Server Starting (ENCRYPTED VERSION)...")
     print("=" * 60)
     
-    # Log tool registration
-    print(f"📦 Registered Tools: {len(mcp._tool_manager._tools)}")
-    for tool_name in mcp._tool_manager._tools.keys():
-        print(f"  ✓ {tool_name}")
+    if encryption_manager.encryption_enabled:
+        print(f"🔐 Encryption: ENABLED (AES-256)")
+        print(f"✅ All sensitive data will be encrypted at rest")
+    else:
+        print(f"🔓 Encryption: DISABLED")
+        print(f"⚠️  Data will be stored in PLAINTEXT!")
     
     print("=" * 60)
-    print(f"🔐 Auth: {'✓ Google OAuth' if auth_provider else '✗ Disabled'}")
-    print(f"🔒 Encryption: {'✓ AES-256' if encryption_manager.encryption_enabled else '✗ Disabled'}")
-    print(f"💾 Storage: {STORAGE_TYPE}")
+    
+    if auth_provider:
+        print(f"🔐 Authentication: ENABLED (Google OAuth)")
+        print(f"🌐 Base URL: {BASE_URL}")
+    else:
+        print(f"🔓 Authentication: DISABLED")
+    
+    print("=" * 60)
+    
+    print(f"📦 Storage Type: {STORAGE_TYPE}")
+    
+    if redis_client:
+        print(f"✅ Redis Status: Connected")
+        print(f"💾 Persistence: ENABLED")
+    else:
+        print(f"⚠️  Redis Status: Not Connected")
+        print(f"💾 Persistence: DISABLED")
+    
     print("=" * 60)
     
     memories = load_memories()
     print(f"✅ Loaded {len(memories)} existing memories")
+    
     print("=" * 60)
-    print("🌐 Server ready!")
+    print(f"🌐 Server ready and listening...")
     print("=" * 60)
     
     mcp.run()
