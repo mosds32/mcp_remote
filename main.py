@@ -25,13 +25,11 @@ class EncryptionManager:
         encryption_key = os.getenv("ENCRYPTION_KEY")
         
         if encryption_key:
-            # Use user-provided key
             try:
-                # Derive a proper Fernet key from the user's key
                 kdf = PBKDF2HMAC(
                     algorithm=hashes.SHA256(),
                     length=32,
-                    salt=b'mcp_memory_salt_v1',  # Fixed salt for consistency
+                    salt=b'mcp_memory_salt_v1',
                     iterations=100000,
                 )
                 key = base64.urlsafe_b64encode(kdf.derive(encryption_key.encode()))
@@ -82,7 +80,6 @@ class EncryptionManager:
         
         encrypted_memory = memory.copy()
         
-        # Encrypt sensitive fields
         if "content" in encrypted_memory:
             encrypted_memory["content"] = self.encrypt(encrypted_memory["content"])
         
@@ -101,7 +98,6 @@ class EncryptionManager:
         
         decrypted_memory = memory.copy()
         
-        # Decrypt sensitive fields
         if "content" in decrypted_memory:
             decrypted_memory["content"] = self.decrypt(decrypted_memory["content"])
         
@@ -121,23 +117,27 @@ encryption_manager = EncryptionManager()
 # ------------------------------
 auth_provider = None
 
-# Check if Google OAuth credentials are available
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-BASE_URL = os.getenv("BASE_URL")  # Your deployed server URL
+BASE_URL = os.getenv("BASE_URL")
 
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
     try:
+        # CRITICAL FIX: Add trailing slash if not present
+        base_url_normalized = BASE_URL.rstrip('/')
+        
         auth_provider = GoogleProvider(
             client_id=GOOGLE_CLIENT_ID,
             client_secret=GOOGLE_CLIENT_SECRET,
-            base_url=BASE_URL
+            base_url=base_url_normalized
         )
         print("✅ Google OAuth authentication enabled")
-        print(f"🔐 Auth URL: {BASE_URL}")
+        print(f"🔐 Auth URL: {base_url_normalized}")
+        print(f"📝 Redirect URI: {base_url_normalized}/oauth/callback")
     except Exception as e:
         print(f"⚠️  Failed to initialize Google OAuth: {e}")
         print("💡 Server will run without authentication")
+        auth_provider = None
 else:
     print("ℹ️  Google OAuth not configured")
     print("💡 To enable Google authentication:")
@@ -147,11 +147,10 @@ else:
     print("   4. Set BASE_URL environment variable (your server URL)")
     print("   5. Add authorized redirect URI: {BASE_URL}/oauth/callback")
 
-# Initialize FastMCP with or without authentication
+# Initialize FastMCP
 mcp = FastMCP(
     name="memory",
-    
-    auth=auth_provider  # Will be None if credentials not configured
+    auth=auth_provider
 )
 
 # ------------------------------
@@ -165,7 +164,6 @@ try:
     REDIS_URL = os.getenv("REDIS_URL")
     
     if REDIS_URL:
-        # Connect to Upstash Redis
         redis_client = redis.from_url(
             REDIS_URL,
             decode_responses=True,
@@ -173,7 +171,6 @@ try:
             socket_keepalive=True,
             health_check_interval=30
         )
-        # Test connection
         redis_client.ping()
         STORAGE_TYPE = "Redis (Upstash - Permanent + Encrypted)" if encryption_manager.encryption_enabled else "Redis (Upstash - Permanent)"
         print("✅ Connected to Upstash Redis")
@@ -181,15 +178,10 @@ try:
     else:
         print("⚠️  REDIS_URL not found in environment variables")
         print("📝 Using temporary in-memory storage")
-        print("💡 To enable permanent storage:")
-        print("   1. Sign up at https://upstash.com (FREE)")
-        print("   2. Create a Redis database")
-        print("   3. Add REDIS_URL environment variable")
         
 except ImportError:
     print("⚠️  Redis package not installed")
-    print("📝 Install with: pip install redis")
-    print("💡 Using temporary in-memory storage")
+    print("📝 Using temporary in-memory storage")
     
 except Exception as e:
     print(f"⚠️  Redis connection failed: {e}")
@@ -210,7 +202,6 @@ def load_memories():
             data = redis_client.get("mcp:memories")
             if data:
                 memories = json.loads(data)
-                # Decrypt memories when loading
                 decrypted_memories = [
                     encryption_manager.decrypt_memory(m) for m in memories
                 ]
@@ -222,7 +213,6 @@ def load_memories():
             return []
         except Exception as e:
             print(f"⚠️  Error loading from Redis: {e}")
-            print("💡 Falling back to in-memory storage")
             return memory_store
     else:
         return memory_store
@@ -233,7 +223,6 @@ def save_memories(memories):
     
     if redis_client:
         try:
-            # Encrypt memories before saving
             encrypted_memories = [
                 encryption_manager.encrypt_memory(m) for m in memories
             ]
@@ -243,7 +232,6 @@ def save_memories(memories):
             return True
         except Exception as e:
             print(f"❌ Error saving to Redis: {e}")
-            print("💡 Falling back to in-memory storage (TEMPORARY)")
             memory_store = memories
             return False
     else:
@@ -267,13 +255,9 @@ def create_memory(key: str, content: str, tag: Optional[str] = None, metadata: O
         
     Returns:
         Success or error message with storage information
-        
-    Example:
-        create_memory("user_pref", "User prefers dark mode", "preferences")
     """
     memories = load_memories()
     
-    # Check if memory exists
     for memory in memories:
         if memory["key"].lower() == key.lower():
             return f"❌ Memory with key '{key}' already exists. Use update_memory to modify it."
@@ -307,9 +291,6 @@ def get_memory(key: str) -> dict:
         
     Returns:
         Dictionary with memory details or error message
-        
-    Example:
-        get_memory("user_pref")
     """
     memories = load_memories()
     
@@ -338,9 +319,6 @@ def get_memory_by_tag(tag: str) -> dict:
         
     Returns:
         Dictionary with matching memories or error message
-        
-    Example:
-        get_memory_by_tag("preferences")
     """
     memories = load_memories()
     
@@ -376,9 +354,6 @@ def update_memory(key: str, new_content: Optional[str] = None, new_tag: Optional
         
     Returns:
         Success message with update details or error message
-        
-    Example:
-        update_memory("user_pref", new_content="User prefers light mode")
     """
     memories = load_memories()
     
@@ -423,9 +398,6 @@ def forget_memory(key: str) -> str:
         
     Returns:
         Success or error message
-        
-    Example:
-        forget_memory("user_pref")
     """
     memories = load_memories()
     original_count = len(memories)
@@ -451,10 +423,6 @@ def list_memories(tag: Optional[str] = None, search: Optional[str] = None) -> di
         
     Returns:
         Dictionary with total count and list of memories
-        
-    Example:
-        list_memories(tag="preferences")
-        list_memories(search="dark mode")
     """
     memories = load_memories()
     
@@ -483,9 +451,6 @@ def list_tags() -> dict:
     
     Returns:
         Dictionary with all tags and their usage counts
-        
-    Example:
-        list_tags()
     """
     memories = load_memories()
     
@@ -520,10 +485,6 @@ def memory_based_chat(message: str, tag: Optional[str] = None) -> str:
         
     Returns:
         Best matching memory content or message if no match found
-        
-    Example:
-        memory_based_chat("What does user prefer?")
-        memory_based_chat("preferences", tag="user")
     """
     memories = load_memories()
     
@@ -560,9 +521,6 @@ def get_server_status() -> dict:
     
     Returns:
         Dictionary with server status, memory counts, storage and security details
-        
-    Example:
-        get_server_status()
     """
     memories = load_memories()
     
@@ -606,9 +564,6 @@ def clear_all_memories() -> str:
         
     Warning:
         This action cannot be undone!
-        
-    Example:
-        clear_all_memories()
     """
     if save_memories([]):
         persistence = "✓ PERMANENT" if redis_client else "⚠ TEMPORARY"
@@ -623,9 +578,6 @@ def get_help_documentation() -> dict:
     
     Returns:
         Dictionary with detailed documentation for each tool
-        
-    Example:
-        get_help_documentation()
     """
     return {
         "server_name": "Memory MCP Server (Encrypted)",
@@ -720,48 +672,6 @@ def get_help_documentation() -> dict:
                 "parameters": {},
                 "example": "get_help_documentation()"
             }
-        },
-        "encryption_setup": {
-            "current_status": "Enabled" if encryption_manager.encryption_enabled else "Disabled",
-            "to_enable_encryption": [
-                "1. Generate a strong encryption key (min 16 characters)",
-                "2. Set ENCRYPTION_KEY environment variable",
-                "3. Keep this key SAFE - you need it to decrypt data!",
-                "4. Restart the MCP server",
-                "5. All new data will be encrypted automatically"
-            ]
-        } if not encryption_manager.encryption_enabled else {
-            "current_status": "✅ Encryption enabled",
-            "algorithm": "AES-256 (Fernet)",
-            "note": "All sensitive data is encrypted at rest"
-        },
-        "storage_setup": {
-            "current_storage": STORAGE_TYPE,
-            "to_enable_permanent_storage": [
-                "1. Visit https://upstash.com (FREE tier available)",
-                "2. Create a new Redis database",
-                "3. Copy REDIS_URL from database details",
-                "4. Set REDIS_URL environment variable",
-                "5. Restart the MCP server"
-            ]
-        } if not redis_client else {
-            "current_storage": STORAGE_TYPE,
-            "status": "✅ Permanent storage enabled"
-        },
-        "auth_setup": {
-            "current_status": "Enabled" if auth_provider else "Disabled",
-            "to_enable_google_auth": [
-                "1. Visit https://console.cloud.google.com",
-                "2. Create OAuth 2.0 credentials",
-                "3. Set GOOGLE_CLIENT_ID environment variable",
-                "4. Set GOOGLE_CLIENT_SECRET environment variable",
-                "5. Set BASE_URL environment variable (your server URL)",
-                "6. Add authorized redirect URI: {BASE_URL}/oauth/callback",
-                "7. Restart the MCP server"
-            ]
-        } if not auth_provider else {
-            "current_status": "✅ Google OAuth enabled",
-            "provider": "Google"
         }
     }
 
@@ -803,45 +713,7 @@ def server_info() -> dict:
             "get_server_status",
             "clear_all_memories",
             "get_help_documentation"
-        ],
-        "security_features": [
-            "AES-256 encryption for sensitive data" if encryption_manager.encryption_enabled else "No encryption",
-            "Google OAuth authentication" if auth_provider else "No authentication",
-            "Encrypted Redis storage" if (redis_client and encryption_manager.encryption_enabled) else "Standard storage"
-        ],
-        "encryption_setup_instructions": {
-            "step_1": "Generate a strong random password (minimum 16 characters)",
-            "step_2": "Add ENCRYPTION_KEY environment variable with your password",
-            "step_3": "Store this key safely - you'll need it to decrypt data!",
-            "step_4": "Redeploy your server",
-            "note": "⚠️ IMPORTANT: Losing your encryption key means losing access to all encrypted data!"
-        } if not encryption_manager.encryption_enabled else {
-            "status": "✅ Encryption configured",
-            "algorithm": "AES-256 (Fernet)"
-        },
-        "auth_setup_instructions": {
-            "step_1": "Visit https://console.cloud.google.com",
-            "step_2": "Create OAuth 2.0 credentials (Web application)",
-            "step_3": "Copy Client ID and Client Secret",
-            "step_4": "Add GOOGLE_CLIENT_ID environment variable",
-            "step_5": "Add GOOGLE_CLIENT_SECRET environment variable",
-            "step_6": "Add BASE_URL environment variable (your server URL)",
-            "step_7": "Add authorized redirect URI: {BASE_URL}/oauth/callback",
-            "step_8": "Redeploy your server",
-            "note": "Google OAuth enables secure authentication for MCP clients"
-        } if not auth_provider else {
-            "status": "✅ Google OAuth configured"
-        },
-        "storage_setup_instructions": {
-            "step_1": "Sign up at https://upstash.com (FREE tier available)",
-            "step_2": "Create a new Redis database",
-            "step_3": "Copy the REDIS_URL from database details",
-            "step_4": "Add REDIS_URL to environment variables",
-            "step_5": "Redeploy your server",
-            "note": "Free tier includes 10,000 commands/day with permanent storage"
-        } if not redis_client else {
-            "status": "✅ Redis configured - using permanent storage"
-        }
+        ]
     }
 
 # ------------------------------
@@ -852,44 +724,31 @@ if __name__ == "__main__":
     print("🚀 FastMCP Memory Server Starting (ENCRYPTED VERSION)...")
     print("=" * 60)
     
-    # Encryption Status
     if encryption_manager.encryption_enabled:
         print(f"🔐 Encryption: ENABLED (AES-256)")
         print(f"✅ All sensitive data will be encrypted at rest")
     else:
         print(f"🔓 Encryption: DISABLED")
         print(f"⚠️  Data will be stored in PLAINTEXT!")
-        print(f"💡 Set ENCRYPTION_KEY environment variable to enable encryption")
     
     print("=" * 60)
     
-    # Authentication Status
     if auth_provider:
         print(f"🔐 Authentication: ENABLED (Google OAuth)")
         print(f"🌐 Base URL: {BASE_URL}")
     else:
         print(f"🔓 Authentication: DISABLED")
-        print(f"💡 Add Google OAuth credentials to enable authentication")
     
     print("=" * 60)
     
-    # Storage Status
     print(f"📦 Storage Type: {STORAGE_TYPE}")
     
     if redis_client:
         print(f"✅ Redis Status: Connected")
-        print(f"💾 Persistence: ENABLED - Data survives restarts!")
-        if encryption_manager.encryption_enabled:
-            print(f"🔐 Security: Data encrypted before storage")
+        print(f"💾 Persistence: ENABLED")
     else:
         print(f"⚠️  Redis Status: Not Connected")
-        print(f"💾 Persistence: DISABLED - Data is temporary!")
-        print(f"")
-        print(f"📝 To enable permanent storage:")
-        print(f"   1. Visit: https://upstash.com")
-        print(f"   2. Create free Redis database")
-        print(f"   3. Set REDIS_URL environment variable")
-        print(f"   4. Restart server")
+        print(f"💾 Persistence: DISABLED")
     
     print("=" * 60)
     
@@ -898,8 +757,6 @@ if __name__ == "__main__":
     
     print("=" * 60)
     print(f"🌐 Server ready and listening...")
-    print(f"🔒 Security Level: {'HIGH' if (encryption_manager.encryption_enabled and auth_provider) else 'MEDIUM' if (encryption_manager.encryption_enabled or auth_provider) else 'LOW'}")
     print("=" * 60)
     
-    # Run with default settings (FastMCP handles transport automatically)
     mcp.run()
