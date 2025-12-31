@@ -753,4 +753,4 @@ if __name__ == "__main__":
     print(f"🌐 Server ready and listening...")
     print("=" * 60)
     
-    mcp.run()
+    mcp.run(transport="sse")
