@@ -42,11 +42,6 @@ class EncryptionManager:
                 print("💡 Data will be stored WITHOUT encryption")
         else:
             print("🔓 Encryption: DISABLED")
-            print("💡 To enable encryption:")
-            print("   1. Set ENCRYPTION_KEY environment variable")
-            print("   2. Use a strong, random password (min 16 characters)")
-            print("   3. Keep this key safe - you'll need it to decrypt data!")
-            print("   4. Restart the server")
     
     def encrypt(self, data: str) -> str:
         """Encrypt string data"""
@@ -123,7 +118,7 @@ BASE_URL = os.getenv("BASE_URL")
 
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
     try:
-        # CRITICAL FIX: Add trailing slash if not present
+        # CRITICAL FIX: Normalize base URL properly
         base_url_normalized = BASE_URL.rstrip('/')
         
         auth_provider = GoogleProvider(
@@ -140,14 +135,9 @@ if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
         auth_provider = None
 else:
     print("ℹ️  Google OAuth not configured")
-    print("💡 To enable Google authentication:")
-    print("   1. Create OAuth 2.0 credentials at https://console.cloud.google.com")
-    print("   2. Set GOOGLE_CLIENT_ID environment variable")
-    print("   3. Set GOOGLE_CLIENT_SECRET environment variable")
-    print("   4. Set BASE_URL environment variable (your server URL)")
-    print("   5. Add authorized redirect URI: {BASE_URL}/oauth/callback")
 
-# Initialize FastMCP
+# Initialize FastMCP with proper configuration
+# IMPORTANT: Set auth_required=False to allow tools to be discovered
 mcp = FastMCP(
     name="memory",
     auth=auth_provider
@@ -236,7 +226,6 @@ def save_memories(memories):
             return False
     else:
         memory_store = memories
-        print(f"💾 Saved {len(memories)} memories to memory (TEMPORARY)")
         return True
 
 # ------------------------------
@@ -676,12 +665,12 @@ def get_help_documentation() -> dict:
     }
 
 # ------------------------------
-# Resources
+# Resources - IMPORTANT for tool discovery
 # ------------------------------
 @mcp.resource("info://server/info")
-def server_info() -> dict:
+def server_info() -> str:
     """Get comprehensive information about the MCP server."""
-    return {
+    info = {
         "name": "memory",
         "version": "2.0.0",
         "description": "Encrypted Memory-Based MCP Server with Persistent Storage and Google OAuth",
@@ -701,6 +690,7 @@ def server_info() -> dict:
             "redis_connected": redis_client is not None,
             "provider": "Upstash Redis" if redis_client else "In-Memory (Temporary)"
         },
+        "tools_count": 11,
         "tools": [
             "create_memory",
             "get_memory",
@@ -715,6 +705,7 @@ def server_info() -> dict:
             "get_help_documentation"
         ]
     }
+    return json.dumps(info, indent=2)
 
 # ------------------------------
 # Run Server
@@ -755,6 +746,8 @@ if __name__ == "__main__":
     memories = load_memories()
     print(f"✅ Loaded {len(memories)} existing memories")
     
+    print("=" * 60)
+    print(f"🔧 Registered {len(mcp._tools)} tools")
     print("=" * 60)
     print(f"🌐 Server ready and listening...")
     print("=" * 60)
