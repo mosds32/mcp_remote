@@ -1,4 +1,4 @@
-from fastmcp import FastMCP, Context
+from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
 import json
 import os
@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
+from contextvars import ContextVar
 
 # ------------------------------
 # HIPAA Compliance Configuration
@@ -93,7 +94,7 @@ class AuditLogger:
             "action": action,
             "resource": resource,
             "success": success,
-            "ip_address": "REDACTED",
+            "ip_address": "REDACTED",  # Should come from request context
             "details": details or {}
         }
         
@@ -102,8 +103,10 @@ class AuditLogger:
         
         if self.redis_client:
             try:
+                # Store in Redis with retention
                 log_key = f"hipaa:audit:{datetime.utcnow().strftime('%Y%m%d')}"
                 self.redis_client.rpush(log_key, encrypted_log)
+                # Set expiry to 7 years (HIPAA requirement)
                 self.redis_client.expire(log_key, HIPAA_CONFIG["data_retention_days"] * 86400)
             except Exception as e:
                 print(f"⚠️ Audit log write failed: {e}")
@@ -111,11 +114,12 @@ class AuditLogger:
         else:
             self.log_buffer.append(encrypted_log)
         
+        # Console logging (sanitized)
         status = "✅ SUCCESS" if success else "❌ FAILED"
         print(f"📋 AUDIT: {status} | User: {user_id[:8]}*** | Action: {action} | Resource: {resource}")
     
     def get_audit_logs(self, user_id: str, days: int = 30) -> list:
-        """Retrieve audit logs"""
+        """Retrieve audit logs (admin function)"""
         if not self.redis_client:
             return [json.loads(encryption_manager.decrypt(log)) for log in self.log_buffer]
         
@@ -188,8 +192,37 @@ except Exception as e:
 # Initialize FastMCP with REQUIRED authentication
 mcp = FastMCP(
     name="hipaa_memory",
-    auth=auth_provider,
+    auth=auth_provider,  # REQUIRED for HIPAA
 )
+
+# Middleware to extract and set user context from authenticated requests
+# Note: This may not be supported by all FastMCP versions
+try:
+    if hasattr(mcp, 'middleware'):
+        @mcp.middleware()
+        async def set_user_context(request, call_next):
+            """Extract user context from authenticated request and set it in context variable"""
+            try:
+                # FastMCP should provide user info in request after authentication
+                # Try to get user from request attributes
+                user_id = getattr(request, 'user_id', None) or getattr(request, 'user', {}).get('id') or getattr(request, 'user', {}).get('sub')
+                email = getattr(request, 'email', None) or getattr(request, 'user', {}).get('email')
+                
+                if user_id:
+                    user_ctx = UserContext(
+                        user_id=str(user_id),
+                        email=str(email) if email else f"user_{user_id}",
+                        authenticated=True
+                    )
+                    _current_user.set(user_ctx)
+            except Exception as e:
+                print(f"⚠️ Warning: Could not extract user context: {e}")
+            
+            response = await call_next(request)
+            return response
+except Exception as e:
+    print(f"⚠️ Note: Middleware not available in this FastMCP version: {e}")
+    print("   User context will be extracted from request in tool functions")
 
 # ------------------------------
 # Redis Storage (REQUIRED for HIPAA)
@@ -224,58 +257,56 @@ except Exception as e:
 audit_logger = AuditLogger(redis_client)
 
 # ------------------------------
-# User Context Extraction (FIXED)
-# ------------------------------
-def get_user_context(ctx: Context) -> UserContext:
-    """
-    Extract user context from FastMCP Context object.
-    This is the PROPER way to get authenticated user info in FastMCP.
-    
-    Args:
-        ctx: FastMCP Context object passed to tool functions
-        
-    Returns:
-        UserContext object with user information
-        
-    Raises:
-        ValueError: If user is not authenticated
-    """
-    # Check if user is authenticated
-    if not ctx or not hasattr(ctx, 'user') or not ctx.user:
-        raise ValueError(
-            "🚨 Unauthenticated access denied - no user context available\n"
-            "Please authenticate using Google OAuth to access patient records."
-        )
-    
-    # Extract user information from FastMCP context
-    user = ctx.user
-    
-    # Get user ID (can be 'sub', 'id', or 'user_id' depending on OAuth provider)
-    user_id = getattr(user, 'sub', None) or getattr(user, 'id', None) or getattr(user, 'user_id', None)
-    
-    # Get email
-    email = getattr(user, 'email', None)
-    
-    if not user_id:
-        raise ValueError(
-            "🚨 Invalid user context - user ID not found\n"
-            "Authentication may be misconfigured."
-        )
-    
-    # Create UserContext object
-    user_context = UserContext(
-        user_id=str(user_id),
-        email=str(email) if email else f"user_{user_id}",
-        authenticated=True
-    )
-    
-    print(f"👤 Authenticated user: {user_context.email} (ID: {user_context.user_id[:8]}***)")
-    
-    return user_context
-
-# ------------------------------
 # User-Isolated Storage Functions
 # ------------------------------
+# Context variable to store current request user
+_current_user: ContextVar[Optional[UserContext]] = ContextVar('current_user', default=None)
+
+def get_user_context(context: Any = None) -> UserContext:
+    """Extract user context from MCP request context"""
+    # Try to get from context variable first (set by middleware if available)
+    user_ctx = _current_user.get()
+    if user_ctx:
+        return user_ctx
+    
+    # Fallback: try to extract from context parameter
+    if context:
+        user_id = getattr(context, 'user_id', None) or getattr(context, 'sub', None)
+        email = getattr(context, 'email', None)
+        if user_id:
+            return UserContext(
+                user_id=str(user_id),
+                email=str(email) if email else f"user_{user_id}",
+                authenticated=True
+            )
+    
+    # Try to get from FastMCP's request context if available
+    try:
+        import inspect
+        frame = inspect.currentframe()
+        # Look for request in calling frames
+        for i in range(5):  # Check up to 5 frames up
+            frame = frame.f_back if frame else None
+            if not frame:
+                break
+            local_vars = frame.f_locals
+            # Check for common request variable names
+            for var_name in ['request', 'req', 'ctx', 'context']:
+                if var_name in local_vars:
+                    req = local_vars[var_name]
+                    user_id = getattr(req, 'user_id', None) or getattr(req, 'user', {}).get('id') if hasattr(req, 'user') else None
+                    email = getattr(req, 'email', None) or getattr(req, 'user', {}).get('email') if hasattr(req, 'user') else None
+                    if user_id:
+                        return UserContext(
+                            user_id=str(user_id),
+                            email=str(email) if email else f"user_{user_id}",
+                            authenticated=True
+                        )
+    except Exception:
+        pass
+    
+    raise ValueError("🚨 Unauthenticated access denied - no user context available")
+
 def load_user_memories(user_context: UserContext) -> list:
     """Load memories for SPECIFIC user only"""
     if not user_context.is_session_valid():
@@ -287,6 +318,7 @@ def load_user_memories(user_context: UserContext) -> list:
         data = redis_client.get(f"{namespace}:memories")
         if data:
             encrypted_memories = json.loads(data)
+            # Decrypt each memory
             decrypted_memories = []
             for encrypted_mem in encrypted_memories:
                 decrypted_mem = {
@@ -330,6 +362,7 @@ def save_user_memories(memories: list, user_context: UserContext) -> bool:
     namespace = user_context.get_storage_namespace()
     
     try:
+        # Encrypt each memory before storage
         encrypted_memories = []
         for mem in memories:
             encrypted_mem = {
@@ -346,6 +379,8 @@ def save_user_memories(memories: list, user_context: UserContext) -> bool:
             encrypted_memories.append(encrypted_mem)
         
         redis_client.set(f"{namespace}:memories", json.dumps(encrypted_memories))
+        
+        # Set expiry to HIPAA retention period (7 years)
         redis_client.expire(
             f"{namespace}:memories", 
             HIPAA_CONFIG["data_retention_days"] * 86400
@@ -370,15 +405,14 @@ def save_user_memories(memories: list, user_context: UserContext) -> bool:
         return False
 
 # ------------------------------
-# HIPAA-Compliant Memory Tools (FIXED)
+# HIPAA-Compliant Memory Tools
 # ------------------------------
 @mcp.tool()
 def create_patient_record(
     patient_id: str,
     content: str,
     record_type: str,
-    metadata: Optional[dict] = None,
-    ctx: Context = None
+    metadata: Optional[dict] = None
 ) -> str:
     """
     Create a new patient record (PHI - Protected Health Information).
@@ -389,13 +423,13 @@ def create_patient_record(
         content: Medical information (encrypted at rest)
         record_type: Type of record (medical_history, social_history, sexual_history, family_history)
         metadata: Additional structured data
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         Success message with audit trail
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     
+    # Validate record type
     valid_types = ["medical_history", "social_history", "sexual_history", "family_history", "general"]
     if record_type not in valid_types:
         audit_logger.log_access(
@@ -409,6 +443,7 @@ def create_patient_record(
     
     memories = load_user_memories(user_ctx)
     
+    # Check for duplicates
     for memory in memories:
         if memory["key"].lower() == patient_id.lower():
             audit_logger.log_access(
@@ -420,6 +455,7 @@ def create_patient_record(
             )
             return f"❌ Patient record '{patient_id}' already exists. Use update_patient_record to modify."
     
+    # Create new record
     new_record = {
         "key": patient_id,
         "content": content,
@@ -451,18 +487,17 @@ def create_patient_record(
         return "⚠️ Record creation failed"
 
 @mcp.tool()
-def get_patient_record(patient_id: str, ctx: Context = None) -> dict:
+def get_patient_record(patient_id: str) -> dict:
     """
     Retrieve a patient record. Users can ONLY access their own records.
     
     Args:
         patient_id: The patient record identifier
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         Patient record data or error
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     for memory in memories:
@@ -501,18 +536,17 @@ def get_patient_record(patient_id: str, ctx: Context = None) -> dict:
     }
 
 @mcp.tool()
-def get_records_by_type(record_type: str, ctx: Context = None) -> dict:
+def get_records_by_type(record_type: str) -> dict:
     """
     Get all patient records of a specific type for the authenticated user.
     
     Args:
         record_type: Type of records to retrieve
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         List of matching records
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     matching = [m for m in memories if m.get("tag", "general").lower() == record_type.lower()]
@@ -539,8 +573,7 @@ def update_patient_record(
     patient_id: str,
     new_content: Optional[str] = None,
     new_record_type: Optional[str] = None,
-    new_metadata: Optional[dict] = None,
-    ctx: Context = None
+    new_metadata: Optional[dict] = None
 ) -> str:
     """
     Update a patient record. Users can ONLY update their own records.
@@ -550,12 +583,11 @@ def update_patient_record(
         new_content: Updated medical information
         new_record_type: Updated record type
         new_metadata: Updated metadata
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         Success message with audit trail
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     for memory in memories:
@@ -608,19 +640,18 @@ def update_patient_record(
     return f"❌ No patient record found: '{patient_id}'"
 
 @mcp.tool()
-def delete_patient_record(patient_id: str, ctx: Context = None) -> str:
+def delete_patient_record(patient_id: str) -> str:
     """
     Delete a patient record. Users can ONLY delete their own records.
     This is logged for HIPAA compliance.
     
     Args:
         patient_id: Patient record to delete
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         Success message with audit trail
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     original_count = len(memories)
     
@@ -657,8 +688,7 @@ def delete_patient_record(patient_id: str, ctx: Context = None) -> str:
 @mcp.tool()
 def list_my_patient_records(
     record_type: Optional[str] = None,
-    search: Optional[str] = None,
-    ctx: Context = None
+    search: Optional[str] = None
 ) -> dict:
     """
     List all patient records for the authenticated user.
@@ -667,12 +697,11 @@ def list_my_patient_records(
     Args:
         record_type: Filter by record type
         search: Search term
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         List of patient records
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     if record_type:
@@ -704,19 +733,18 @@ def list_my_patient_records(
     }
 
 @mcp.tool()
-def get_my_audit_trail(days: int = 30, ctx: Context = None) -> dict:
+def get_my_audit_trail(days: int = 30) -> dict:
     """
     View audit trail of all access to your patient records.
     HIPAA requires maintaining audit logs of all PHI access.
     
     Args:
         days: Number of days of logs to retrieve
-        ctx: FastMCP context (automatically injected)
         
     Returns:
         Audit log entries
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     
     all_logs = audit_logger.get_audit_logs(user_ctx.user_id, days)
     user_logs = [log for log in all_logs if log["user_id"] == user_ctx.user_id]
@@ -732,17 +760,14 @@ def get_my_audit_trail(days: int = 30, ctx: Context = None) -> dict:
     }
 
 @mcp.tool()
-def get_hipaa_compliance_status(ctx: Context = None) -> dict:
+def get_hipaa_compliance_status() -> dict:
     """
     Get HIPAA compliance status and security configuration.
     
-    Args:
-        ctx: FastMCP context (automatically injected)
-        
     Returns:
         Compliance status report
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     return {
@@ -783,18 +808,15 @@ def get_hipaa_compliance_status(ctx: Context = None) -> dict:
     }
 
 @mcp.tool()
-def export_my_data(ctx: Context = None) -> dict:
+def export_my_data() -> dict:
     """
     Export all patient records for the authenticated user.
     Required for HIPAA Right of Access.
     
-    Args:
-        ctx: FastMCP context (automatically injected)
-        
     Returns:
         Complete data export
     """
-    user_ctx = get_user_context(ctx)
+    user_ctx = get_user_context()
     memories = load_user_memories(user_ctx)
     
     audit_logger.log_access(
@@ -826,9 +848,8 @@ def hipaa_status() -> str:
     """Get HIPAA compliance status"""
     status = {
         "name": "HIPAA-Compliant Memory MCP Server",
-        "version": "2.1.0-HIPAA-FIXED",
+        "version": "2.0.0-HIPAA",
         "hipaa_compliant": True,
-        "authentication": "PROPERLY CONFIGURED",
         "security_features": {
             "encryption": "AES-256 (Fernet)",
             "authentication": "Google OAuth (Required)",
@@ -858,12 +879,12 @@ def hipaa_status() -> str:
 # ------------------------------
 if __name__ == "__main__":
     print("=" * 70)
-    print("🏥 HIPAA-COMPLIANT MCP SERVER STARTING (FIXED VERSION)")
+    print("🏥 HIPAA-COMPLIANT MCP SERVER STARTING")
     print("=" * 70)
     print()
     print("✅ SECURITY FEATURES:")
     print("   🔐 AES-256 Encryption: ENABLED")
-    print("   🔑 Google OAuth: REQUIRED & PROPERLY CONFIGURED")
+    print("   🔑 Google OAuth: REQUIRED")
     print("   👤 User Isolation: ENABLED")
     print("   📋 Audit Logging: ENABLED")
     print("   💾 Persistent Storage: ENABLED")
@@ -873,11 +894,6 @@ if __name__ == "__main__":
     print(f"   ⏱️  Session Timeout: {HIPAA_CONFIG['session_timeout_minutes']} minutes")
     print("   🚫 Cross-User Access: BLOCKED")
     print("   📝 PHI Access Logging: REQUIRED")
-    print()
-    print("✅ AUTHENTICATION FIX:")
-    print("   ✨ FastMCP Context properly extracted")
-    print("   ✨ User info from ctx.user object")
-    print("   ✨ All tools receive authenticated context")
     print()
     print("=" * 70)
     print("🔧 REGISTERED TOOLS:")
