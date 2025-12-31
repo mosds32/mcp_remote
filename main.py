@@ -140,7 +140,8 @@ else:
 # IMPORTANT: Set auth_required=False to allow tools to be discovered
 mcp = FastMCP(
     name="memory",
-    auth=auth_provider
+    auth=auth_provider,
+    auth_required=False
 )
 
 # ------------------------------
