@@ -1,4 +1,5 @@
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.google import GoogleProvider
 import json
 import os
 from typing import Optional
@@ -107,36 +108,40 @@ class EncryptionManager:
 encryption_manager = EncryptionManager()
 
 # ------------------------------
-# Authentication Configuration - SIMPLIFIED
+# Authentication Configuration
 # ------------------------------
 auth_provider = None
-auth_provider_name = "None"
 
-# Static Token Authentication ONLY
-AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+BASE_URL = os.getenv("BASE_URL")
 
-if AUTH_TOKEN:
+if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
     try:
-        from fastmcp.server.auth.providers.static_token import StaticTokenProvider
+        # CRITICAL FIX: Normalize base URL properly
+        base_url_normalized = BASE_URL.rstrip('/')
         
-        auth_provider = StaticTokenProvider(token=AUTH_TOKEN)
-        auth_provider_name = "Static Token"
-        print("✅ Token authentication enabled")
-        print("🔐 Use header: Authorization: Bearer YOUR_TOKEN")
-    except ImportError:
-        print(f"⚠️  Static token provider not available")
-        print("💡 Install with: pip install fastmcp")
+        auth_provider = GoogleProvider(
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            base_url=base_url_normalized
+        )
+        print("✅ Google OAuth authentication enabled")
+        print(f"🔐 Auth URL: {base_url_normalized}")
+        print(f"📝 Redirect URI: {base_url_normalized}/oauth/callback")
     except Exception as e:
-        print(f"⚠️  Failed to initialize token auth: {e}")
+        print(f"⚠️  Failed to initialize Google OAuth: {e}")
+        print("💡 Server will run without authentication")
+        auth_provider = None
 else:
-    print("⚠️  No AUTH_TOKEN found in environment variables")
-    print("💡 Set AUTH_TOKEN to enable authentication")
-    print("💡 Example: AUTH_TOKEN=your_secret_token_here")
+    print("ℹ️  Google OAuth not configured")
 
-# Initialize FastMCP with authentication
+# Initialize FastMCP with proper configuration
+# IMPORTANT: Set auth_required=False to allow tools to be discovered
 mcp = FastMCP(
     name="memory",
-    auth=auth_provider,
+    auth=None,
+   
 )
 
 # ------------------------------
@@ -167,7 +172,6 @@ try:
         
 except ImportError:
     print("⚠️  Redis package not installed")
-    print("💡 Install with: pip install redis")
     print("📝 Using temporary in-memory storage")
     
 except Exception as e:
@@ -522,7 +526,7 @@ def get_server_status() -> dict:
     return {
         "authentication": {
             "enabled": auth_provider is not None,
-            "provider": auth_provider_name,
+            "provider": "Google OAuth" if auth_provider else "None",
             "status": auth_status
         },
         "encryption": {
@@ -570,7 +574,7 @@ def get_help_documentation() -> dict:
         "version": "2.0.0",
         "authentication": {
             "enabled": auth_provider is not None,
-            "provider": auth_provider_name
+            "provider": "Google OAuth" if auth_provider else "None"
         },
         "encryption": {
             "enabled": encryption_manager.encryption_enabled,
@@ -670,10 +674,11 @@ def server_info() -> str:
     info = {
         "name": "memory",
         "version": "2.0.0",
-        "description": "Encrypted Memory-Based MCP Server with Persistent Storage and Token Authentication",
+        "description": "Encrypted Memory-Based MCP Server with Persistent Storage and Google OAuth",
         "authentication": {
             "enabled": auth_provider is not None,
-            "provider": auth_provider_name
+            "provider": "Google OAuth" if auth_provider else "None",
+            "base_url": BASE_URL if auth_provider else None
         },
         "encryption": {
             "enabled": encryption_manager.encryption_enabled,
@@ -708,7 +713,7 @@ def server_info() -> str:
 # ------------------------------
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 FastMCP Memory Server Starting (AUTH TOKEN VERSION)...")
+    print("🚀 FastMCP Memory Server Starting (ENCRYPTED VERSION)...")
     print("=" * 60)
     
     if encryption_manager.encryption_enabled:
@@ -721,10 +726,10 @@ if __name__ == "__main__":
     print("=" * 60)
     
     if auth_provider:
-        print(f"🔐 Authentication: ENABLED ({auth_provider_name})")
+        print(f"🔐 Authentication: ENABLED (Google OAuth)")
+        print(f"🌐 Base URL: {BASE_URL}")
     else:
         print(f"🔓 Authentication: DISABLED")
-        print(f"💡 Set AUTH_TOKEN environment variable to enable")
     
     print("=" * 60)
     
@@ -748,4 +753,4 @@ if __name__ == "__main__":
     print(f"🌐 Server ready and listening...")
     print("=" * 60)
     
-    mcp.run(transport="sse")
+    mcp.run()
