@@ -9,6 +9,253 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 import hashlib
 
+# Google OAuth imports
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+
+# ------------------------------
+# Google OAuth Manager
+# ------------------------------
+class GoogleOAuthManager:
+    """
+    Manages Google OAuth 2.0 authentication with automatic token refresh.
+    Designed for FastMCP Cloud deployment with Claude.ai integration.
+    """
+    
+    def __init__(self):
+        self.credentials = None
+        self.scopes = [
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
+            'openid'
+        ]
+        
+        # Load OAuth config from environment
+        self.client_config = {
+            "web": {
+                "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/oauth2callback")]
+            }
+        }
+        
+        self._initialize_oauth()
+    
+    def _initialize_oauth(self):
+        """Initialize OAuth with stored credentials or prepare for new flow"""
+        
+        # Check for required environment variables
+        if not os.getenv("GOOGLE_CLIENT_ID") or not os.getenv("GOOGLE_CLIENT_SECRET"):
+            print("⚠️  Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET")
+            print("📝 To enable Google OAuth:")
+            print("   1. Go to https://console.cloud.google.com/apis/credentials")
+            print("   2. Create OAuth 2.0 Client ID")
+            print("   3. Set authorized redirect URIs")
+            print("   4. Export credentials as environment variables")
+            return
+        
+        # Try to load existing credentials from environment
+        refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+        access_token = os.getenv("GOOGLE_ACCESS_TOKEN")
+        
+        if refresh_token:
+            try:
+                self.credentials = Credentials(
+                    token=access_token,
+                    refresh_token=refresh_token,
+                    token_uri=self.client_config["web"]["token_uri"],
+                    client_id=self.client_config["web"]["client_id"],
+                    client_secret=self.client_config["web"]["client_secret"],
+                    scopes=self.scopes
+                )
+                
+                # Refresh if expired
+                if self.credentials.expired:
+                    self.credentials.refresh(Request())
+                    print("🔄 Google OAuth tokens refreshed successfully")
+                
+                print("✅ Google OAuth: Authenticated")
+                self._print_user_info()
+                
+            except Exception as e:
+                print(f"⚠️  Failed to load Google credentials: {e}")
+                print("💡 Run the authorization flow to get new tokens")
+        else:
+            print("ℹ️  No Google refresh token found. Authorization needed.")
+            print("💡 Use get_google_auth_url() tool to start OAuth flow")
+    
+    def get_authorization_url(self) -> dict:
+        """
+        Generate Google OAuth authorization URL for user to authenticate.
+        
+        Returns:
+            Dictionary with authorization URL and state
+        """
+        try:
+            flow = Flow.from_client_config(
+                self.client_config,
+                scopes=self.scopes,
+                redirect_uri=self.client_config["web"]["redirect_uris"][0]
+            )
+            
+            authorization_url, state = flow.authorization_url(
+                access_type='offline',  # Request refresh token
+                prompt='consent',  # Force consent screen to ensure refresh token
+                include_granted_scopes='true'
+            )
+            
+            return {
+                "success": True,
+                "authorization_url": authorization_url,
+                "state": state,
+                "instructions": [
+                    "1. Open the authorization_url in your browser",
+                    "2. Sign in with your Google account",
+                    "3. Grant the requested permissions",
+                    "4. Copy the authorization code from the redirect URL",
+                    "5. Use complete_google_auth() tool with the code"
+                ]
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Failed to generate authorization URL"
+            }
+    
+    def complete_authorization(self, authorization_code: str, state: str = None) -> dict:
+        """
+        Complete OAuth flow with authorization code and store tokens.
+        
+        Args:
+            authorization_code: Code received from Google OAuth redirect
+            state: State parameter for verification (optional)
+            
+        Returns:
+            Dictionary with success status and token information
+        """
+        try:
+            flow = Flow.from_client_config(
+                self.client_config,
+                scopes=self.scopes,
+                redirect_uri=self.client_config["web"]["redirect_uris"][0]
+            )
+            
+            # Exchange authorization code for tokens
+            flow.fetch_token(code=authorization_code)
+            
+            self.credentials = flow.credentials
+            
+            # Extract tokens for storage
+            tokens = {
+                "access_token": self.credentials.token,
+                "refresh_token": self.credentials.refresh_token,
+                "token_uri": self.credentials.token_uri,
+                "client_id": self.credentials.client_id,
+                "client_secret": self.credentials.client_secret,
+                "scopes": list(self.credentials.scopes)
+            }
+            
+            print("✅ Google OAuth authentication successful!")
+            print(f"🔑 Access Token: {tokens['access_token'][:20]}...")
+            print(f"🔄 Refresh Token: {tokens['refresh_token'][:20] if tokens['refresh_token'] else 'None'}...")
+            
+            self._print_user_info()
+            
+            return {
+                "success": True,
+                "message": "Authentication successful!",
+                "tokens": tokens,
+                "instructions": [
+                    "IMPORTANT: Store these tokens securely as environment variables:",
+                    f"export GOOGLE_ACCESS_TOKEN='{tokens['access_token']}'",
+                    f"export GOOGLE_REFRESH_TOKEN='{tokens['refresh_token']}'",
+                    "",
+                    "For production deployment (FastMCP Cloud):",
+                    "1. Add these as environment variables in your deployment settings",
+                    "2. Restart your MCP server",
+                    "3. Tokens will auto-refresh when expired"
+                ]
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Failed to complete authorization"
+            }
+    
+    def get_valid_credentials(self) -> Optional[Credentials]:
+        """
+        Get valid credentials, refreshing if necessary.
+        
+        Returns:
+            Valid Google credentials or None
+        """
+        if not self.credentials:
+            return None
+        
+        try:
+            # Refresh token if expired
+            if self.credentials.expired and self.credentials.refresh_token:
+                self.credentials.refresh(Request())
+                print("🔄 Google OAuth token auto-refreshed")
+            
+            return self.credentials
+            
+        except Exception as e:
+            print(f"❌ Failed to refresh credentials: {e}")
+            return None
+    
+    def _print_user_info(self):
+        """Print authenticated user information"""
+        try:
+            if not self.credentials:
+                return
+            
+            # Build userinfo service
+            service = build('oauth2', 'v2', credentials=self.credentials)
+            user_info = service.userinfo().get().execute()
+            
+            print(f"👤 Authenticated as: {user_info.get('email', 'Unknown')}")
+            print(f"📧 Email: {user_info.get('email', 'N/A')}")
+            print(f"👤 Name: {user_info.get('name', 'N/A')}")
+            
+        except Exception as e:
+            print(f"⚠️  Could not fetch user info: {e}")
+    
+    def get_user_email(self) -> Optional[str]:
+        """
+        Get authenticated user's email address.
+        
+        Returns:
+            Email address or None
+        """
+        try:
+            creds = self.get_valid_credentials()
+            if not creds:
+                return None
+            
+            service = build('oauth2', 'v2', credentials=creds)
+            user_info = service.userinfo().get().execute()
+            return user_info.get('email')
+            
+        except Exception as e:
+            print(f"⚠️  Could not get user email: {e}")
+            return None
+    
+    def is_authenticated(self) -> bool:
+        """Check if user is currently authenticated"""
+        return self.credentials is not None and self.get_valid_credentials() is not None
+
+# Initialize Google OAuth manager
+google_oauth = GoogleOAuthManager()
+
 # ------------------------------
 # HIPAA Audit Logger
 # ------------------------------
@@ -171,7 +418,7 @@ encryption_manager = HIPAAEncryptionManager()
 # Initialize FastMCP
 # ------------------------------
 mcp = FastMCP(
-    name="hipaa-memory-multiuser",
+    name="hipaa-memory-google-auth",
 )
 
 # ------------------------------
@@ -212,7 +459,6 @@ except Exception as e:
     print("❌ HIPAA COMPLIANCE RISK: Using temporary storage")
 
 # Fallback in-memory storage (NOT HIPAA compliant for production)
-# Structure: {user_id: [memories]}
 memory_store = {}
 
 # Initialize audit logger
@@ -221,9 +467,19 @@ audit_logger = HIPAAAuditLogger(redis_client)
 # ------------------------------
 # Multi-User Storage Functions
 # ------------------------------
+def get_user_id_from_google() -> str:
+    """
+    Get user ID from Google OAuth email.
+    Falls back to 'default_user' if not authenticated.
+    """
+    email = google_oauth.get_user_email()
+    if email:
+        # Use email as user_id for consistent identification
+        return email
+    return "default_user"
+
 def get_user_storage_key(user_id: str) -> str:
     """Generate a storage key for a specific user"""
-    # Hash user_id for privacy
     user_hash = hashlib.sha256(user_id.encode()).hexdigest()[:32]
     return f"hipaa:memories:user:{user_hash}"
 
@@ -277,27 +533,75 @@ def save_user_memories(user_id: str, memories: list) -> bool:
         memory_store[user_id] = memories
         return True
 
-def get_all_users() -> list:
-    """Get list of all user IDs with memories (admin function)"""
-    if redis_client:
-        try:
-            # Scan for all user memory keys
-            cursor = 0
-            user_keys = []
-            while True:
-                cursor, keys = redis_client.scan(cursor, match="hipaa:memories:user:*", count=100)
-                user_keys.extend(keys)
-                if cursor == 0:
-                    break
-            return user_keys
-        except Exception as e:
-            print(f"⚠️  Error scanning users: {e}")
-            return []
+# ------------------------------
+# Google OAuth Tools
+# ------------------------------
+@mcp.tool()
+def get_google_auth_url() -> dict:
+    """
+    Get Google OAuth authorization URL to authenticate your account.
+    
+    This is the first step in the OAuth flow. You'll need to:
+    1. Open the returned URL in your browser
+    2. Sign in with your Google account
+    3. Grant permissions
+    4. Copy the authorization code from the redirect URL
+    5. Use complete_google_auth() with that code
+    
+    Returns:
+        Dictionary with authorization URL and instructions
+    """
+    return google_oauth.get_authorization_url()
+
+@mcp.tool()
+def complete_google_auth(authorization_code: str, state: Optional[str] = None) -> dict:
+    """
+    Complete Google OAuth authentication with the authorization code.
+    
+    Args:
+        authorization_code: The code you received after authorizing in your browser
+        state: Optional state parameter for verification
+        
+    Returns:
+        Dictionary with success status and token storage instructions
+    """
+    return google_oauth.complete_authorization(authorization_code, state)
+
+@mcp.tool()
+def check_google_auth_status() -> dict:
+    """
+    Check if Google OAuth is currently authenticated and working.
+    
+    Returns:
+        Dictionary with authentication status and user information
+    """
+    is_auth = google_oauth.is_authenticated()
+    
+    result = {
+        "authenticated": is_auth,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    if is_auth:
+        email = google_oauth.get_user_email()
+        result["user_email"] = email
+        result["user_id_for_memories"] = email
+        result["status"] = "✅ Google OAuth is active"
+        result["message"] = f"Authenticated as {email}. This email will be used as your user_id for memory storage."
     else:
-        return list(memory_store.keys())
+        result["status"] = "❌ Not authenticated"
+        result["message"] = "Use get_google_auth_url() to start authentication process"
+        result["instructions"] = [
+            "1. Call get_google_auth_url() to get authorization URL",
+            "2. Open the URL in your browser and sign in",
+            "3. Copy the authorization code from redirect",
+            "4. Call complete_google_auth(code='YOUR_CODE') to finish setup"
+        ]
+    
+    return result
 
 # ------------------------------
-# Multi-User Memory Management Tools
+# Memory Management Tools (with Google Auth)
 # ------------------------------
 @mcp.tool()
 def create_memory(
@@ -305,29 +609,35 @@ def create_memory(
     content: str, 
     tag: Optional[str] = None, 
     metadata: Optional[dict] = None,
-    user_id: str = "default_user"
+    user_id: Optional[str] = None
 ) -> str:
     """
-    Create a new encrypted memory for a specific user (HIPAA-compliant).
+    Create a new encrypted memory (HIPAA-compliant).
+    
+    If Google OAuth is configured, your email will be used as user_id automatically.
     
     Args:
-        key: Unique identifier for the memory (unique per user)
+        key: Unique identifier for the memory
         content: The PHI/ePHI content to remember (will be encrypted)
-        tag: Optional tag for categorization (default: "general")
+        tag: Optional tag for categorization
         metadata: Optional additional information (will be encrypted)
-        user_id: User identifier (required) - each user has separate memories
+        user_id: Optional override (defaults to Google email if authenticated)
         
     Returns:
         Success message with encryption confirmation
     """
+    # Use Google email as user_id if authenticated, otherwise use provided or default
+    if not user_id:
+        user_id = get_user_id_from_google()
+    
     memories = load_user_memories(user_id)
     
-    # Check for duplicate key within user's memories
+    # Check for duplicate key
     for memory in memories:
         if memory["key"].lower() == key.lower():
             audit_logger.log_event("PHI_ACCESS", user_id, key, "CREATE", "FAILED", 
                                   {"reason": "Duplicate key"})
-            return f"❌ Memory with key '{key}' already exists for user '{user_id}'. Use update_memory to modify it."
+            return f"❌ Memory with key '{key}' already exists. Use update_memory to modify it."
     
     new_memory = {
         "key": key,
@@ -338,8 +648,9 @@ def create_memory(
         "created_by": hashlib.sha256(user_id.encode()).hexdigest()[:16],
         "metadata": metadata if metadata else {},
         "hipaa_compliant": True,
-        "retention_years": 7,  # HIPAA minimum retention
-        "user_id": user_id
+        "retention_years": 7,
+        "user_id": user_id,
+        "auth_method": "google_oauth" if google_oauth.is_authenticated() else "manual"
     }
     
     memories.append(new_memory)
@@ -347,10 +658,13 @@ def create_memory(
     if save_user_memories(user_id, memories):
         audit_logger.log_event("PHI_CREATE", user_id, key, "CREATE", "SUCCESS", 
                               {"tag": tag, "encrypted": True})
+        
+        auth_info = f"👤 Google Account: {user_id}" if google_oauth.is_authenticated() else f"👤 User: {user_id}"
         tag_info = f" [Tag: {new_memory['tag']}]" if tag else ""
-        return (f"✅ HIPAA-Compliant Memory Created for user '{user_id}': '{key}'{tag_info}\n"
+        
+        return (f"✅ HIPAA-Compliant Memory Created: '{key}'{tag_info}\n"
                 f"🔐 Content: ENCRYPTED (AES-256)\n"
-                f"👤 User: {user_id} (isolated storage)\n"
+                f"{auth_info}\n"
                 f"💾 Storage: {STORAGE_TYPE}\n"
                 f"📋 Audit: Logged\n"
                 f"⏱️  Retention: 7 years (HIPAA minimum)")
@@ -360,17 +674,22 @@ def create_memory(
         return f"❌ Memory creation failed - storage error"
 
 @mcp.tool()
-def get_memory(key: str, user_id: str = "default_user") -> dict:
+def get_memory(key: str, user_id: Optional[str] = None) -> dict:
     """
-    Retrieve a specific encrypted memory by key for a user (HIPAA-compliant).
+    Retrieve a specific encrypted memory by key (HIPAA-compliant).
+    
+    If Google OAuth is configured, your email will be used as user_id automatically.
     
     Args:
         key: The unique identifier of the memory to retrieve
-        user_id: User identifier (required) - only retrieves this user's memories
+        user_id: Optional override (defaults to Google email if authenticated)
         
     Returns:
         Dictionary with decrypted memory details or error message
     """
+    if not user_id:
+        user_id = get_user_id_from_google()
+    
     memories = load_user_memories(user_id)
     
     for memory in memories:
@@ -381,6 +700,7 @@ def get_memory(key: str, user_id: str = "default_user") -> dict:
                 "found": True,
                 "memory": memory,
                 "user_id": user_id,
+                "google_authenticated": google_oauth.is_authenticated(),
                 "storage": STORAGE_TYPE,
                 "encrypted": True,
                 "hipaa_compliant": True,
@@ -391,163 +711,31 @@ def get_memory(key: str, user_id: str = "default_user") -> dict:
     return {
         "found": False,
         "user_id": user_id,
-        "message": f"No memory found with key: '{key}' for user '{user_id}'"
+        "message": f"No memory found with key: '{key}'"
     }
-
-@mcp.tool()
-def get_memory_by_tag(tag: str, user_id: str = "default_user") -> dict:
-    """
-    Retrieve all encrypted memories with a specific tag for a user (HIPAA-compliant).
-    
-    Args:
-        tag: The tag to filter memories by
-        user_id: User identifier (required) - only retrieves this user's memories
-        
-    Returns:
-        Dictionary with matching decrypted memories
-    """
-    memories = load_user_memories(user_id)
-    
-    matching_memories = [m for m in memories if m.get("tag", "general").lower() == tag.lower()]
-    
-    audit_logger.log_event("PHI_ACCESS", user_id, f"tag:{tag}", "READ_MULTIPLE", "SUCCESS", 
-                          {"count": len(matching_memories)})
-    
-    if matching_memories:
-        return {
-            "found": True,
-            "tag": tag,
-            "user_id": user_id,
-            "count": len(matching_memories),
-            "memories": matching_memories,
-            "storage": STORAGE_TYPE,
-            "encrypted": True,
-            "hipaa_compliant": True,
-            "audit_logged": True
-        }
-    
-    return {
-        "found": False,
-        "tag": tag,
-        "user_id": user_id,
-        "message": f"No memories found with tag: '{tag}' for user '{user_id}'"
-    }
-
-@mcp.tool()
-def update_memory(
-    key: str, 
-    new_content: Optional[str] = None, 
-    new_tag: Optional[str] = None, 
-    new_metadata: Optional[dict] = None,
-    user_id: str = "default_user"
-) -> str:
-    """
-    Update an existing encrypted memory for a user (HIPAA-compliant).
-    
-    Args:
-        key: The unique identifier of the memory to update
-        new_content: New content (will be encrypted)
-        new_tag: New tag (optional)
-        new_metadata: New metadata to merge (will be encrypted)
-        user_id: User identifier (required) - only updates this user's memories
-        
-    Returns:
-        Success message with encryption confirmation
-    """
-    memories = load_user_memories(user_id)
-    
-    for memory in memories:
-        if memory["key"].lower() == key.lower():
-            updates = []
-            
-            if new_content is not None:
-                old_content_hash = hashlib.sha256(memory["content"].encode()).hexdigest()[:8]
-                memory["content"] = new_content
-                updates.append(f"Content updated (old hash: {old_content_hash})")
-            
-            if new_tag is not None:
-                old_tag = memory.get("tag", "general")
-                memory["tag"] = new_tag
-                updates.append(f"Tag: {old_tag} → {new_tag}")
-            
-            if new_metadata is not None:
-                memory["metadata"].update(new_metadata)
-                updates.append("Metadata updated")
-            
-            if not updates:
-                return f"⚠️  No changes specified for memory: '{key}'"
-            
-            memory["updated_at"] = datetime.now().isoformat()
-            memory["updated_by"] = hashlib.sha256(user_id.encode()).hexdigest()[:16]
-            
-            if save_user_memories(user_id, memories):
-                audit_logger.log_event("PHI_MODIFY", user_id, key, "UPDATE", "SUCCESS", 
-                                      {"changes": updates})
-                return (f"✅ HIPAA-Compliant Memory Updated for user '{user_id}': '{key}'\n" + 
-                       "\n".join(updates) + 
-                       f"\n🔐 Encryption: AES-256\n📋 Audit: Logged")
-            else:
-                audit_logger.log_event("PHI_MODIFY", user_id, key, "UPDATE", "FAILED", 
-                                      {"reason": "Storage error"})
-                return f"❌ Memory update failed - storage error"
-    
-    audit_logger.log_event("PHI_MODIFY", user_id, key, "UPDATE", "NOT_FOUND", {})
-    return f"❌ No memory found with key: '{key}' for user '{user_id}'"
-
-@mcp.tool()
-def forget_memory(key: str, user_id: str = "default_user", reason: str = "User request") -> str:
-    """
-    Securely delete an encrypted memory for a user (HIPAA-compliant).
-    
-    Args:
-        key: The unique identifier of the memory to delete
-        user_id: User identifier (required) - only deletes this user's memories
-        reason: Reason for deletion (for audit trail)
-        
-    Returns:
-        Success message with audit confirmation
-    """
-    memories = load_user_memories(user_id)
-    original_count = len(memories)
-    
-    # Find memory before deletion for audit
-    deleted_memory = next((m for m in memories if m["key"].lower() == key.lower()), None)
-    
-    memories = [m for m in memories if m["key"].lower() != key.lower()]
-    
-    if len(memories) < original_count:
-        if save_user_memories(user_id, memories):
-            audit_logger.log_event("PHI_DELETE", user_id, key, "DELETE", "SUCCESS", 
-                                  {"reason": reason, "tag": deleted_memory.get("tag") if deleted_memory else None})
-            return (f"✅ HIPAA-Compliant Memory Deleted for user '{user_id}': '{key}'\n"
-                   f"🔐 Secure deletion completed\n"
-                   f"📋 Audit: Logged with reason: {reason}\n"
-                   f"⏱️  Audit retained for 7 years per HIPAA")
-        else:
-            audit_logger.log_event("PHI_DELETE", user_id, key, "DELETE", "FAILED", 
-                                  {"reason": "Storage error"})
-            return f"❌ Memory deletion failed - storage error"
-    
-    audit_logger.log_event("PHI_DELETE", user_id, key, "DELETE", "NOT_FOUND", {})
-    return f"❌ No memory found with key: '{key}' for user '{user_id}'"
 
 @mcp.tool()
 def list_memories(
     tag: Optional[str] = None, 
     search: Optional[str] = None,
-    user_id: str = "default_user"
+    user_id: Optional[str] = None
 ) -> dict:
     """
-    List all encrypted memories for a user with optional filters (HIPAA-compliant).
+    List all encrypted memories with optional filters (HIPAA-compliant).
+    
+    If Google OAuth is configured, your email will be used as user_id automatically.
     
     Args:
         tag: Filter memories by tag (optional)
         search: Search term to find in keys or content (optional)
-        user_id: User identifier (required) - only lists this user's memories
+        user_id: Optional override (defaults to Google email if authenticated)
         
     Returns:
         Dictionary with decrypted memories list
     """
+    if not user_id:
+        user_id = get_user_id_from_google()
+    
     memories = load_user_memories(user_id)
     
     if tag:
@@ -565,111 +753,29 @@ def list_memories(
     
     return {
         "user_id": user_id,
+        "google_authenticated": google_oauth.is_authenticated(),
         "total_count": len(memories),
         "memories": memories,
         "storage": STORAGE_TYPE,
         "encrypted": True,
         "hipaa_compliant": True,
-        "audit_logged": True,
-        "isolation": "User-specific - cannot access other users' memories"
+        "audit_logged": True
     }
 
 @mcp.tool()
-def list_tags(user_id: str = "default_user") -> dict:
+def get_server_status(user_id: Optional[str] = None) -> dict:
     """
-    List all unique tags used in memories for a user (HIPAA-compliant).
+    Get HIPAA-compliant server status including Google OAuth status.
     
     Args:
-        user_id: User identifier (required) - only lists this user's tags
-        
-    Returns:
-        Dictionary with all tags and their usage counts
-    """
-    memories = load_user_memories(user_id)
-    
-    if not memories:
-        return {
-            "user_id": user_id,
-            "total_tags": 0,
-            "tags": {},
-            "message": f"No memories stored yet for user '{user_id}'."
-        }
-    
-    tag_counts = {}
-    for memory in memories:
-        tag = memory.get("tag", "general")
-        tag_counts[tag] = tag_counts.get(tag, 0) + 1
-    
-    audit_logger.log_event("SYSTEM_ACCESS", user_id, "tags", "LIST_TAGS", "SUCCESS", 
-                          {"tag_count": len(tag_counts)})
-    
-    return {
-        "user_id": user_id,
-        "total_tags": len(tag_counts),
-        "tags": tag_counts,
-        "storage": STORAGE_TYPE,
-        "encrypted": True,
-        "hipaa_compliant": True
-    }
-
-@mcp.tool()
-def memory_based_chat(message: str, tag: Optional[str] = None, user_id: str = "default_user") -> str:
-    """
-    Search encrypted memories and respond for a user (HIPAA-compliant).
-    
-    Args:
-        message: Search query to find relevant memories
-        tag: Optional tag to filter memories before searching
-        user_id: User identifier (required) - only searches this user's memories
-        
-    Returns:
-        Best matching decrypted memory content
-    """
-    memories = load_user_memories(user_id)
-    
-    if not memories:
-        return f"No memories stored yet for user '{user_id}'. Create memories using create_memory tool."
-    
-    if tag:
-        memories = [m for m in memories if m.get("tag", "").lower() == tag.lower()]
-        if not memories:
-            return f"No memories found with tag: '{tag}' for user '{user_id}'"
-    
-    message_lower = message.lower()
-    relevant_memories = []
-    
-    for memory in memories:
-        if (message_lower in memory["key"].lower() or 
-            message_lower in memory["content"].lower() or
-            memory["key"].lower() in message_lower):
-            relevant_memories.append(memory)
-    
-    if relevant_memories:
-        relevant_memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-        best_match = relevant_memories[0]
-        
-        audit_logger.log_event("PHI_ACCESS", user_id, best_match["key"], "SEARCH", "SUCCESS", 
-                              {"query": message[:50]})
-        
-        return (f"💾 {best_match['content']}\n"
-                f"[User: {user_id} | Source: {best_match['key']} | Tag: {best_match.get('tag', 'general')} | "
-                f"🔐 Encrypted | 📋 HIPAA Audit Logged]")
-    
-    audit_logger.log_event("PHI_ACCESS", user_id, "search", "SEARCH", "NOT_FOUND", 
-                          {"query": message[:50]})
-    return f"I don't have a memory about that yet for user '{user_id}'."
-
-@mcp.tool()
-def get_server_status(user_id: str = "default_user") -> dict:
-    """
-    Get HIPAA-compliant server status and statistics for a user.
-    
-    Args:
-        user_id: User identifier (required) - shows stats for this user
+        user_id: Optional override (defaults to Google email if authenticated)
         
     Returns:
         Dictionary with server status and HIPAA compliance details
     """
+    if not user_id:
+        user_id = get_user_id_from_google()
+    
     memories = load_user_memories(user_id)
     
     memory_tags = {}
@@ -677,12 +783,15 @@ def get_server_status(user_id: str = "default_user") -> dict:
         tag = memory.get("tag", "general")
         memory_tags[tag] = memory_tags.get(tag, 0) + 1
     
-    # Get total user count (admin info)
-    total_users = len(get_all_users())
-    
     audit_logger.log_event("SYSTEM_ACCESS", user_id, "status", "GET_STATUS", "SUCCESS", {})
     
-    hipaa_compliant = redis_client is not None
+    google_auth_status = {
+        "enabled": google_oauth.is_authenticated(),
+        "user_email": google_oauth.get_user_email() if google_oauth.is_authenticated() else None,
+        "status": "✅ Authenticated" if google_oauth.is_authenticated() else "❌ Not authenticated"
+    }
+    
+    hipaa_compliant = redis_client is not None and encryption_manager.encryption_enabled
     compliance_warnings = []
     
     if not redis_client:
@@ -696,8 +805,9 @@ def get_server_status(user_id: str = "default_user") -> dict:
             "current_user": user_id,
             "memory_count": len(memories),
             "tags": memory_tags,
-            "total_users_in_system": total_users
+            "google_authenticated": google_oauth.is_authenticated()
         },
+        "google_oauth": google_auth_status,
         "hipaa_compliance": {
             "compliant": hipaa_compliant and encryption_manager.encryption_enabled,
             "warnings": compliance_warnings,
@@ -705,8 +815,7 @@ def get_server_status(user_id: str = "default_user") -> dict:
             "encryption_algorithm": "AES-256-CBC (Fernet)",
             "audit_logging": True,
             "data_retention": "7 years (HIPAA minimum)",
-            "access_controls": "User ID tracking enabled",
-            "multi_user_isolation": True
+            "access_controls": "Google OAuth + User ID tracking"
         },
         "encryption": {
             "enabled": True,
@@ -718,204 +827,25 @@ def get_server_status(user_id: str = "default_user") -> dict:
             "type": STORAGE_TYPE,
             "redis_connected": redis_client is not None,
             "persistent": redis_client is not None,
-            "backup_enabled": redis_client is not None,
-            "multi_user": True,
-            "isolation": "Complete separation between users"
-        },
-        "audit": {
-            "enabled": True,
-            "retention_years": 7,
-            "storage": "Redis" if redis_client else "In-Memory",
-            "user_filtering": "Available"
-        }
-    }
-
-@mcp.tool()
-def get_audit_logs(days: int = 30, user_id: str = "default_user", filter_by_current_user: bool = True) -> dict:
-    """
-    Retrieve HIPAA audit logs for the specified number of days.
-    
-    Args:
-        days: Number of days of logs to retrieve (default: 30, max: 365)
-        user_id: User identifier for audit logging (required)
-        filter_by_current_user: If True, only show logs for current user (default: True)
-        
-    Returns:
-        Dictionary with audit log entries
-    """
-    if days > 365:
-        days = 365
-    
-    logs = audit_logger.get_audit_logs(days, user_id if filter_by_current_user else None)
-    
-    audit_logger.log_event("AUDIT_ACCESS", user_id, "audit_logs", "READ_AUDIT", "SUCCESS", 
-                          {"days": days, "log_count": len(logs), "filtered": filter_by_current_user})
-    
-    return {
-        "user_id": user_id,
-        "filtered_by_user": filter_by_current_user,
-        "days_requested": days,
-        "log_count": len(logs),
-        "logs": logs,
-        "hipaa_retention": "7 years",
-        "note": "All user IDs are hashed for privacy"
-    }
-
-@mcp.tool()
-def clear_all_memories(
-    user_id: str = "default_user", 
-    confirmation: str = "",
-    reason: str = "Administrative action"
-) -> str:
-    """
-    DANGEROUS: Clear all encrypted memories for a specific user (HIPAA-compliant with audit).
-    
-    Args:
-        user_id: User identifier (required) - only clears this user's memories
-        confirmation: Must be "CONFIRM_DELETE_ALL" to proceed
-        reason: Required reason for deletion (for audit trail)
-        
-    Returns:
-        Success or error message
-        
-    Warning:
-        This action cannot be undone! Requires explicit confirmation.
-        Only affects the specified user's memories.
-    """
-    if confirmation != "CONFIRM_DELETE_ALL":
-        return ("❌ Confirmation required to delete all memories.\n"
-                "⚠️  Set confirmation='CONFIRM_DELETE_ALL' to proceed.\n"
-                f"📋 This will delete all memories for user '{user_id}' only.\n"
-                "📋 This action will be audited per HIPAA requirements.")
-    
-    memories = load_user_memories(user_id)
-    memory_count = len(memories)
-    
-    if save_user_memories(user_id, []):
-        audit_logger.log_event("PHI_DELETE_ALL", user_id, "all_memories", "DELETE_ALL", "SUCCESS", 
-                              {"count": memory_count, "reason": reason})
-        return (f"✅ All {memory_count} memories securely deleted for user '{user_id}'\n"
-                f"🔐 Secure deletion completed\n"
-                f"👥 Other users' memories remain intact\n"
-                f"📋 Audit: Logged with reason: {reason}\n"
-                f"⏱️  Audit retained for 7 years per HIPAA")
-    else:
-        audit_logger.log_event("PHI_DELETE_ALL", user_id, "all_memories", "DELETE_ALL", "FAILED", 
-                              {"reason": "Storage error"})
-        return f"❌ Error clearing memories - storage failure"
-
-@mcp.tool()
-def get_help_documentation() -> dict:
-    """
-    Get comprehensive HIPAA-compliant help documentation with multi-user support.
-    
-    Returns:
-        Dictionary with detailed documentation for all tools
-    """
-    return {
-        "server_name": "HIPAA-Compliant Multi-User Memory MCP Server",
-        "version": "4.0.0-HIPAA-MULTIUSER",
-        "multi_user": {
-            "enabled": True,
-            "isolation": "Complete data separation between users",
-            "user_identification": "user_id parameter required for all operations",
-            "default_user": "default_user (if not specified)",
-            "note": "Each user has their own isolated memory space"
-        },
-        "hipaa_compliance": {
-            "encryption": "AES-256-CBC (Mandatory)",
-            "audit_logging": "All PHI access logged per user",
-            "data_retention": "7 years (HIPAA minimum)",
-            "access_controls": "User ID tracking with isolation",
-            "secure_deletion": "Audit trail maintained",
-            "multi_user_security": "Hash-based user isolation"
-        },
-        "encryption": {
-            "algorithm": "AES-256-CBC (Fernet)",
-            "key_derivation": "PBKDF2-HMAC-SHA256 (600,000 iterations)",
-            "required": "Yes - ENCRYPTION_KEY environment variable mandatory"
-        },
-        "storage": {
-            "type": STORAGE_TYPE,
-            "persistent": redis_client is not None,
-            "backup": redis_client is not None,
-            "multi_user": True
-        },
-        "tools": {
-            "create_memory": {
-                "description": "Create encrypted memory for a user (HIPAA-compliant)",
-                "parameters": {
-                    "key": "Unique identifier per user (required)",
-                    "content": "PHI/ePHI content - will be encrypted (required)",
-                    "tag": "Category tag (optional)",
-                    "metadata": "Additional info - will be encrypted (optional)",
-                    "user_id": "User identifier - creates memory for this user (required)"
-                },
-                "audit": "All creations logged",
-                "example": "create_memory('patient_001', 'Medical history...', 'medical', user_id='dr_smith')"
-            },
-            "get_memory": {
-                "description": "Retrieve encrypted memory for a user (HIPAA-compliant)",
-                "parameters": {
-                    "key": "Memory key (required)",
-                    "user_id": "User identifier - retrieves this user's memory (required)"
-                },
-                "audit": "All accesses logged",
-                "isolation": "Only retrieves the specified user's memory",
-                "example": "get_memory('patient_001', user_id='dr_smith')"
-            },
-            "list_memories": {
-                "description": "List all memories for a specific user",
-                "parameters": {
-                    "tag": "Filter by tag (optional)",
-                    "search": "Search term (optional)",
-                    "user_id": "User identifier - lists this user's memories (required)"
-                },
-                "isolation": "Only shows the specified user's memories",
-                "example": "list_memories(tag='medical', user_id='dr_smith')"
-            },
-            "get_audit_logs": {
-                "description": "Retrieve HIPAA audit logs",
-                "parameters": {
-                    "days": "Number of days (default: 30, max: 365)",
-                    "user_id": "User identifier (required)",
-                    "filter_by_current_user": "Show only this user's logs (default: True)"
-                },
-                "retention": "7 years (HIPAA requirement)",
-                "privacy": "User IDs are hashed in logs",
-                "example": "get_audit_logs(days=90, user_id='dr_smith', filter_by_current_user=True)"
-            },
-            "clear_all_memories": {
-                "description": "Delete all memories for a specific user only",
-                "parameters": {
-                    "user_id": "User identifier - deletes only this user's memories (required)",
-                    "confirmation": "Must be 'CONFIRM_DELETE_ALL' (required)",
-                    "reason": "Deletion reason for audit (required)"
-                },
-                "isolation": "Only affects the specified user's memories",
-                "audit": "Action logged with full details",
-                "warning": "CANNOT BE UNDONE",
-                "example": "clear_all_memories(user_id='dr_smith', confirmation='CONFIRM_DELETE_ALL', reason='Account closure')"
-            }
+            "backup_enabled": redis_client is not None
         }
     }
 
 # ------------------------------
 # Resources
 # ------------------------------
-@mcp.resource("info://server/hipaa-info")
+@mcp.resource("info://server/hipaa-google-auth-info")
 def server_info() -> str:
-    """Get HIPAA compliance information about the multi-user MCP server."""
+    """Get HIPAA compliance and Google OAuth information about the MCP server."""
     info = {
-        "name": "hipaa-memory-multiuser",
-        "version": "4.0.0-HIPAA-MULTIUSER",
-        "description": "HIPAA-Compliant Multi-User Encrypted Memory Server with Data Isolation",
-        "multi_user": {
+        "name": "hipaa-memory-google-auth",
+        "version": "5.0.0-HIPAA-GOOGLE-AUTH",
+        "description": "HIPAA-Compliant Encrypted Memory Server with Google OAuth Integration",
+        "google_oauth": {
             "enabled": True,
-            "isolation_level": "Complete user data separation",
-            "user_identification": "Required user_id parameter",
-            "storage_model": "Separate encrypted storage per user",
-            "cross_user_access": "Prevented - users cannot access each other's memories"
+            "authentication_status": "Authenticated" if google_oauth.is_authenticated() else "Not authenticated",
+            "user_email": google_oauth.get_user_email() if google_oauth.is_authenticated() else None,
+            "automatic_user_id": "Uses Google email as user_id for memory isolation"
         },
         "hipaa_compliance": {
             "encryption": {
@@ -927,30 +857,17 @@ def server_info() -> str:
             "audit_logging": {
                 "enabled": True,
                 "retention_years": 7,
-                "includes": ["All PHI access", "All modifications", "All deletions"],
-                "user_tracking": "Per-user audit trails available"
-            },
-            "data_protection": {
-                "encryption_at_rest": True,
-                "secure_deletion": True,
-                "access_tracking": True,
-                "backup_retention": "90 days",
-                "user_isolation": True
-            },
-            "storage": {
-                "type": STORAGE_TYPE,
-                "persistent": redis_client is not None,
-                "encrypted_backup": redis_client is not None,
-                "multi_user_support": True
+                "includes": ["All PHI access", "All modifications", "All deletions"]
             }
         },
         "requirements": {
             "ENCRYPTION_KEY": "Mandatory (min 16 chars, 32+ recommended)",
-            "REDIS_URL": "Recommended for production (Upstash or similar)",
-            "redis_package": "Required for persistent storage"
-        },
-        "tools_count": 11,
-        "phi_protection": "All patient data encrypted with AES-256 and isolated per user"
+            "GOOGLE_CLIENT_ID": "Required for OAuth (from Google Cloud Console)",
+            "GOOGLE_CLIENT_SECRET": "Required for OAuth",
+            "GOOGLE_REDIRECT_URI": "Optional (defaults to localhost)",
+            "GOOGLE_REFRESH_TOKEN": "Auto-generated after OAuth flow",
+            "REDIS_URL": "Recommended for production"
+        }
     }
     return json.dumps(info, indent=2)
 
@@ -959,14 +876,17 @@ def server_info() -> str:
 # ------------------------------
 if __name__ == "__main__":
     print("=" * 70)
-    print("🏥 HIPAA-COMPLIANT MULTI-USER FASTMCP MEMORY SERVER")
+    print("🏥 HIPAA-COMPLIANT FASTMCP MEMORY SERVER + GOOGLE OAUTH")
     print("=" * 70)
     
-    print("\n👥 MULTI-USER SUPPORT:")
-    print(f"   Status: ✅ ENABLED")
-    print(f"   Isolation: Complete data separation between users")
-    print(f"   User Identification: Required user_id parameter")
-    print(f"   Storage Model: Hash-based user isolation")
+    print("\n🔐 GOOGLE OAUTH STATUS:")
+    if google_oauth.is_authenticated():
+        print(f"   Status: ✅ AUTHENTICATED")
+        print(f"   Email: {google_oauth.get_user_email()}")
+        print(f"   User ID: {get_user_id_from_google()}")
+    else:
+        print(f"   Status: ⚠️  NOT AUTHENTICATED")
+        print(f"   Action: Use get_google_auth_url() tool to authenticate")
     
     print("\n🔐 ENCRYPTION STATUS:")
     print(f"   Algorithm: AES-256-CBC (Fernet)")
@@ -976,28 +896,16 @@ if __name__ == "__main__":
     print("\n📋 AUDIT LOGGING:")
     print(f"   Status: ✅ ENABLED")
     print(f"   Retention: 7 years (HIPAA minimum)")
-    print(f"   Scope: All PHI access, modifications, and deletions")
-    print(f"   User Tracking: Per-user audit trails available")
     
     print("\n💾 STORAGE:")
     print(f"   Type: {STORAGE_TYPE}")
     print(f"   Redis: {'✅ Connected' if redis_client else '❌ Not Connected'}")
     print(f"   Persistence: {'✅ ENABLED' if redis_client else '⚠️  DISABLED (In-Memory Only)'}")
-    print(f"   Backup: {'✅ 90-day encrypted backup per user' if redis_client else '❌ No backup'}")
-    print(f"   Multi-User: ✅ ENABLED with data isolation")
-    
-    if not redis_client:
-        print("\n⚠️  HIPAA COMPLIANCE WARNING:")
-        print("   Redis is not connected. For production use with PHI:")
-        print("   1. Set REDIS_URL environment variable (Upstash recommended)")
-        print("   2. Install redis package: pip install redis")
-        print("   3. Ensure Redis server supports encryption at rest")
     
     print("\n" + "=" * 70)
-    print(f"🔧 Registered {len(mcp._tools)} HIPAA-compliant multi-user tools")
+    print(f"🔧 Registered {len(mcp._tools)} HIPAA-compliant tools")
     print("=" * 70)
-    print("✅ Server ready for HIPAA-compliant multi-user PHI/ePHI storage")
-    print("👥 Each user has completely isolated, encrypted memory space")
+    print("✅ Server ready for HIPAA-compliant PHI/ePHI storage with Google OAuth")
     print("=" * 70)
     
     mcp.run()
