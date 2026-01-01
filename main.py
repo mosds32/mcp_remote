@@ -1,4 +1,5 @@
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.google import GoogleProvider
 import json
 import os
 from typing import Optional
@@ -168,10 +169,60 @@ class HIPAAEncryptionManager:
 encryption_manager = HIPAAEncryptionManager()
 
 # ------------------------------
-# Initialize FastMCP
+# Google OAuth Authentication Configuration
+# ------------------------------
+auth_provider = None
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+BASE_URL = os.getenv("BASE_URL")
+
+if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL:
+    try:
+        # Normalize base URL properly (remove trailing slash)
+        base_url_normalized = BASE_URL.rstrip('/')
+        
+        auth_provider = GoogleProvider(
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            base_url=base_url_normalized
+        )
+        print("=" * 70)
+        print("🔐 GOOGLE OAUTH AUTHENTICATION")
+        print("=" * 70)
+        print("✅ Google OAuth: ENABLED")
+        print(f"🌐 Base URL: {base_url_normalized}")
+        print(f"📝 Redirect URI: {base_url_normalized}/oauth/callback")
+        print(f"🔑 Client ID: {GOOGLE_CLIENT_ID[:20]}...")
+        print("=" * 70)
+    except Exception as e:
+        print(f"⚠️  Failed to initialize Google OAuth: {e}")
+        print("💡 Server will run without authentication")
+        auth_provider = None
+else:
+    print("=" * 70)
+    print("⚠️  GOOGLE OAUTH NOT CONFIGURED")
+    print("=" * 70)
+    if not GOOGLE_CLIENT_ID:
+        print("❌ Missing: GOOGLE_CLIENT_ID")
+    if not GOOGLE_CLIENT_SECRET:
+        print("❌ Missing: GOOGLE_CLIENT_SECRET")
+    if not BASE_URL:
+        print("❌ Missing: BASE_URL")
+    print("\n💡 To enable Google OAuth authentication:")
+    print("   1. Set GOOGLE_CLIENT_ID environment variable")
+    print("   2. Set GOOGLE_CLIENT_SECRET environment variable")
+    print("   3. Set BASE_URL environment variable (e.g., https://your-domain.com)")
+    print("   4. Configure OAuth consent screen in Google Cloud Console")
+    print("   5. Add authorized redirect URI: {BASE_URL}/oauth/callback")
+    print("=" * 70)
+
+# ------------------------------
+# Initialize FastMCP with Authentication
 # ------------------------------
 mcp = FastMCP(
     name="hipaa-memory-multiuser",
+    auth=auth_provider,  # ✅ PROPERLY ENABLED - Authentication is now active!
 )
 
 # ------------------------------
@@ -698,6 +749,12 @@ def get_server_status(user_id: str = "default_user") -> dict:
             "tags": memory_tags,
             "total_users_in_system": total_users
         },
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "status": "✅ ENABLED" if auth_provider else "❌ DISABLED",
+            "base_url": BASE_URL if auth_provider else None
+        },
         "hipaa_compliance": {
             "compliant": hipaa_compliant and encryption_manager.encryption_enabled,
             "warnings": compliance_warnings,
@@ -815,6 +872,18 @@ def get_help_documentation() -> dict:
     return {
         "server_name": "HIPAA-Compliant Multi-User Memory MCP Server",
         "version": "4.0.0-HIPAA-MULTIUSER",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "status": "✅ ENABLED" if auth_provider else "❌ DISABLED",
+            "setup_required": [
+                "GOOGLE_CLIENT_ID environment variable",
+                "GOOGLE_CLIENT_SECRET environment variable",
+                "BASE_URL environment variable",
+                "OAuth consent screen in Google Cloud Console",
+                "Authorized redirect URI: {BASE_URL}/oauth/callback"
+            ] if not auth_provider else None
+        },
         "multi_user": {
             "enabled": True,
             "isolation": "Complete data separation between users",
@@ -909,7 +978,14 @@ def server_info() -> str:
     info = {
         "name": "hipaa-memory-multiuser",
         "version": "4.0.0-HIPAA-MULTIUSER",
-        "description": "HIPAA-Compliant Multi-User Encrypted Memory Server with Data Isolation",
+        "description": "HIPAA-Compliant Multi-User Encrypted Memory Server with Google OAuth and Data Isolation",
+        "authentication": {
+            "enabled": auth_provider is not None,
+            "provider": "Google OAuth" if auth_provider else "None",
+            "status": "✅ ACTIVE - Server requires authentication" if auth_provider else "❌ DISABLED",
+            "base_url": BASE_URL if auth_provider else None,
+            "redirect_uri": f"{BASE_URL}/oauth/callback" if auth_provider else None
+        },
         "multi_user": {
             "enabled": True,
             "isolation_level": "Complete user data separation",
@@ -947,6 +1023,9 @@ def server_info() -> str:
         "requirements": {
             "ENCRYPTION_KEY": "Mandatory (min 16 chars, 32+ recommended)",
             "REDIS_URL": "Recommended for production (Upstash or similar)",
+            "GOOGLE_CLIENT_ID": "Required for Google OAuth" if not auth_provider else "✅ Configured",
+            "GOOGLE_CLIENT_SECRET": "Required for Google OAuth" if not auth_provider else "✅ Configured",
+            "BASE_URL": "Required for Google OAuth" if not auth_provider else "✅ Configured",
             "redis_package": "Required for persistent storage"
         },
         "tools_count": 11,
@@ -961,6 +1040,19 @@ if __name__ == "__main__":
     print("=" * 70)
     print("🏥 HIPAA-COMPLIANT MULTI-USER FASTMCP MEMORY SERVER")
     print("=" * 70)
+    
+    print("\n🔐 AUTHENTICATION STATUS:")
+    if auth_provider:
+        print(f"   Status: ✅ ENABLED (Google OAuth)")
+        print(f"   Provider: Google OAuth 2.0")
+        print(f"   Base URL: {BASE_URL}")
+        print(f"   Redirect URI: {BASE_URL}/oauth/callback")
+        print(f"   Client ID: {GOOGLE_CLIENT_ID[:20]}...")
+        print(f"   ⚠️  IMPORTANT: Server requires authentication to access tools")
+    else:
+        print(f"   Status: ❌ DISABLED")
+        print(f"   ⚠️  WARNING: Server is running without authentication!")
+        print(f"   💡 Configure Google OAuth for production use")
     
     print("\n👥 MULTI-USER SUPPORT:")
     print(f"   Status: ✅ ENABLED")
@@ -998,6 +1090,10 @@ if __name__ == "__main__":
     print("=" * 70)
     print("✅ Server ready for HIPAA-compliant multi-user PHI/ePHI storage")
     print("👥 Each user has completely isolated, encrypted memory space")
+    if auth_provider:
+        print("🔐 Google OAuth authentication is ACTIVE - login required")
+    else:
+        print("⚠️  No authentication - configure Google OAuth for production")
     print("=" * 70)
     
     mcp.run()
